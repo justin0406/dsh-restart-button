@@ -1,8 +1,8 @@
-// Mount test for the client half of @local/dsh-restart, using a tiny React-like
+// Mount test for the client half of dsh-restart-button, using a tiny React-like
 // renderer with hooks so the real component code runs unchanged.
 import assert from 'node:assert'
 
-const MODULE_ID = '@local/dsh-restart'
+const MODULE_ID = 'dsh-restart-button'
 let loaded = null
 const modules = {}
 

@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-restart',
+  id: 'dsh-restart-button',
   factory(require) {
     const React = require('react')
     const { createElement: h, useCallback, useEffect, useSyncExternalStore } = React

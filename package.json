@@ -1,6 +1,6 @@
 {
-  "name": "@local/dsh-restart",
-  "version": "2.1.0",
+  "name": "dsh-restart-button",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "One-click restart for DeepSeek Harness: quits the whole process tree and brings it back in a clean environment. Supports the desktop app (macOS/Windows) and `dsh web`.",
@@ -19,7 +19,8 @@
     "locale/en.json",
     "locale/zh.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "dsh": {
     "bundle": {

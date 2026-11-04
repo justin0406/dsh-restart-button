@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 
 export const inject = ['webServer']
 
-export const PLUGIN_NAME = '@local/dsh-restart'
+export const PLUGIN_NAME = 'dsh-restart-button'
 const ROUTE_PREFIX = '/api/dsh-restart'
 const DEFAULT_APP_ID = 'com.deepseek.dsh'
 const DEFAULT_DELAY_MS = 900

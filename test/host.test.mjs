@@ -1,4 +1,4 @@
-// Host-half tests for @local/dsh-restart: routing, request trust, target
+// Host-half tests for dsh-restart-button: routing, request trust, target
 // detection and the helper task file. No process is restarted here (dryRun and
 // the 409 path keep the helper out of the picture); the restart state machine
 // itself is covered by restart.test.mjs and helper.test.mjs.
