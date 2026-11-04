@@ -1,6 +1,12 @@
-# dsh-restart-button
+<h1 align="center">dsh-restart-button</h1>
 
-**English** · [简体中文](README.zh-CN.md)
+<p align="center"><strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a></p>
+
+<p align="center">
+  <a href="https://github.com/justin0406/dsh-restart-button/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button"><img alt="GitHub stars" src="https://img.shields.io/github/stars/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
+</p>
 
 A one-click restart button for [DeepSeek Harness](https://github.com/deepseek-ai). It adds a small
 button next to **Settings** at the bottom of the sidebar; clicking it opens a confirmation dialog and

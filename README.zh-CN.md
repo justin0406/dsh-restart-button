@@ -1,6 +1,12 @@
-# dsh-restart-button
+<h1 align="center">dsh-restart-button</h1>
 
-[English](README.md) · **简体中文**
+<p align="center"><a href="./README.md">English</a> · <strong>简体中文</strong></p>
+
+<p align="center">
+  <a href="https://github.com/justin0406/dsh-restart-button/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button"><img alt="GitHub stars" src="https://img.shields.io/github/stars/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
+</p>
 
 给 DeepSeek Harness 加一个「重启」按钮：侧边栏底部（设置按钮旁）多出一个小按钮，点一下弹出确认框，
 确认后 DSH 走正常退出流程并自动重新启动。
