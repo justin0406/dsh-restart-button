@@ -1,0 +1,57 @@
+{
+  "name": "@local/dsh-restart",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One-click restart for DeepSeek Harness: quits the whole process tree and brings it back in a clean environment. Supports the desktop app (macOS/Windows) and `dsh web`.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./restart.mjs": "./restart.mjs",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "restart.mjs",
+    "cordis.patch.yml",
+    "locale/en.json",
+    "locale/zh.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/restart.test.mjs && node test/host.test.mjs && node test/client.test.mjs && node test/helper.test.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/justin0406/dsh-restart-button.git"
+  },
+  "homepage": "https://github.com/justin0406/dsh-restart-button#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "restart",
+    "cordis"
+  ]
+}

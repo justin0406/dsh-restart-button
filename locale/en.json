@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Restart DSH",
+    "description": "Adds a one-click restart button to the sidebar footer: it asks DeepSeek Harness to quit and relaunches the app."
+  }
+}
