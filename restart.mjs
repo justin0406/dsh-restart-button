@@ -44,6 +44,8 @@ export const LAUNCH_WAIT_MS = numberFromEnv('DSH_RESTART_LAUNCH_WAIT_MS', 15_000
 export const LAUNCH_TRIES = numberFromEnv('DSH_RESTART_LAUNCH_TRIES', 4)
 /** How long a process may take to exit after we ask it to. */
 export const PROCESS_WAIT_MS = numberFromEnv('DSH_RESTART_PROCESS_WAIT_MS', 20_000)
+/** On Windows a plain window close only hides DSH to the tray; force it down after this. */
+export const QUIT_GRACE_MS = numberFromEnv('DSH_RESTART_QUIT_GRACE_MS', 8_000)
 export const POLL_MS = 120
 const WINDOW_VISIBLE_TIMEOUT_MS = 90_000
 
@@ -343,7 +345,12 @@ export async function stopTree(rootPid, log = () => {}, { signal = 'SIGTERM', gr
   if (order.length === 0 && !pidAlive(rootPid)) return []
   log(`stopping process tree of ${rootPid} (${order.length} descendant(s))`)
   if (IS_WINDOWS) {
-    await runCapture('taskkill', ['/PID', String(rootPid), '/T', '/F'])
+    // `taskkill /T` terminates every descendant of the root, and this helper
+    // was spawned by that very host — so `/T` kills the helper halfway through
+    // the restart.  Kill the snapshot leaves one by one instead;
+    // `descendantOrder` already excludes this process.
+    for (const pid of order) await runCapture('taskkill', ['/PID', String(pid), '/F'])
+    await runCapture('taskkill', ['/PID', String(rootPid), '/F'])
     return order.length > 0 ? order : [rootPid]
   }
   for (const pid of order) signalPid(pid, signal)
@@ -439,8 +446,34 @@ async function requestQuit(target, log) {
     return
   }
   if (IS_WINDOWS) {
-    log(`posting a close message to ${target.mainPid}`)
+    if (!Number.isInteger(target.mainPid) || target.mainPid <= 0) {
+      log('no main process recorded; nothing to close politely')
+      return
+    }
+    // A bare `taskkill /PID` only posts WM_CLOSE, and DSH answers a window
+    // close by hiding to the tray — the app never exits.  Give it a short
+    // chance to quit on its own, then force the tree down.
+    log(`asking ${target.mainPid} to close politely`)
     await runCapture('taskkill', ['/PID', String(target.mainPid)])
+    const exited = await waitFor(async () => {
+      const table = await processTable()
+      return findMainProcesses(target, table).length === 0
+    }, QUIT_GRACE_MS, 250)
+    if (exited) {
+      log('main process exited after the close request')
+      return
+    }
+    log(
+      `main process ignored the close request after ${Math.round(QUIT_GRACE_MS / 1000)}s ` +
+        '(DSH hides to the tray instead of quitting); forcing it down',
+    )
+    if (Number.isInteger(target.hostPid) && target.hostPid > 0) await stopTree(target.hostPid, log)
+    const table = await processTable()
+    for (const pid of findMainProcesses(target, table)) await stopTree(pid, log)
+    await waitFor(async () => {
+      const current = await processTable()
+      return findMainProcesses(target, current).length === 0
+    }, 8_000, 250)
     return
   }
   log(`unsupported platform ${PLATFORM}: not sending a quit request`)
@@ -593,7 +626,7 @@ async function restartCli(target, log) {
 
 const ENSURE_VISIBLE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
-$pidToFind = [int]$args[0]
+$pidToFind = [int]$env:DSH_RESTART_WINDOW_PID
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $pidToFind)
@@ -602,7 +635,7 @@ if ($null -eq $window) { exit 3 }
 $pattern = $null
 if (-not $window.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$pattern)) { exit 4 }
 $pattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal)
-$window.SetFocus()
+try { $window.SetFocus() } catch { }
 exit 0
 `
 
@@ -625,9 +658,12 @@ async function focusRestoredWindow(target, log) {
             'Bypass',
             '-Command',
             ENSURE_VISIBLE_SCRIPT,
-            String(pid),
           ],
-          { stdio: 'ignore', windowsHide: true },
+          {
+            stdio: 'ignore',
+            windowsHide: true,
+            env: { ...process.env, DSH_RESTART_WINDOW_PID: String(pid) },
+          },
         )
         child.once('close', (value) => resolve(value ?? 1))
         child.once('error', () => resolve(1))

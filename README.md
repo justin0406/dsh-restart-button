@@ -22,7 +22,7 @@ verified on real hardware); on Linux the button reports `unsupported-platform` a
 
 | Shape | macOS | Windows |
 |---|---|---|
-| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ logic taken from `dsh-restart@0.2.1`, which was verified on Windows (two adaptations are listed under *Known limitations*) |
+| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ verified on hardware (2.2.1, 2026-11-05) |
 | `dsh web` (CLI carrier) | ✅ verified on hardware (2.1.0, 2026-11-04: process-tree replacement + automatic page reload) | ✅ same implementation (process table via CIM/PowerShell) |
 
 Where the plugin cannot restart DSH (the entry point is neither `dsh-desktop-host` nor
@@ -146,6 +146,21 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Changelog
 
+### 2.2.1
+
+- Windows: `stopTree` no longer uses `taskkill /T /F`. The helper is spawned by the host it is killing,
+  so `/T` terminated the helper halfway through the restart. Process trees are now taken from the
+  snapshot and killed leaf first, one pid at a time.
+- Windows: the desktop quit path falls back to forcing the trees down. A plain `taskkill /PID` only
+  posts `WM_CLOSE`, and DSH hides to the tray instead of quitting — the old code waited 90 s and gave
+  up ("leaving the app alone"). The polite close is still attempted first; `QUIT_GRACE_MS` (8 s)
+  later the app is force-closed.
+- Windows: confirmed working on real hardware (2.2.1, 2026-11-05).
+- Windows: window restore works again. The pid used to be passed as a trailing `-Command` argument,
+  which PowerShell folds into the command text instead of `$args`, so the script searched for process
+  0 and exited with code 3. It now travels through `DSH_RESTART_WINDOW_PID`, and a failing `SetFocus`
+  is ignored.
+
 ### 2.1.0
 
 - Fixed "the dialog stays on *waiting for the new process* forever": the helper's entry-point check
@@ -164,10 +179,10 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Known limitations
 
-- **Two adaptations on Windows**: quitting uses `taskkill /PID` (graceful) instead of
-  `taskkill /T /F`, and the relaunch additionally requires the new main process to stay alive for 3 s.
-  Everything else (process detection, CIM snapshot, direct spawn, UIAutomation window restore) comes
-  from `0.2.1`, which was verified on Windows.
+- **Windows quit path**: quitting keeps a polite `taskkill /PID` first (so DSH could still show its
+  own confirmation), but because closing the window only hides DSH to the tray, the helper forces the
+  process trees down after `QUIT_GRACE_MS` (8 s, `DSH_RESTART_QUIT_GRACE_MS`). The relaunch requires
+  the new main process to stay alive for 3 s. This path is verified on Windows hardware as of 2.2.1.
 - A `dsh web` started with `--port 0` comes back on a different port; the page polls relative paths,
   so it can only ask you to open the new address. Fixed ports are fine.
 - Restarting the desktop app necessarily interrupts the current turn/session.

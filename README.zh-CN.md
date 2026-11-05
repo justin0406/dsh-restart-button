@@ -21,7 +21,7 @@ macOS 与 Windows 的两种形态都支持。Linux 不做支持（无法实机�
 
 | 运行形态 | macOS | Windows |
 |---|---|---|
-| 桌面应用（Electron） | ✅ 实机验证（2.1.0，2026-11-04：退出→干净拉起→自动恢复，8.2s） | ✅ 逻辑来自 Windows 实机验证过的 `dsh-restart@0.2.1`（两处融合改动见「已知限制」） |
+| 桌面应用（Electron） | ✅ 实机验证（2.1.0，2026-11-04：退出→干净拉起→自动恢复，8.2s） | ✅ Windows 实机确认可用（2.2.1，2026-11-05） |
 | `dsh web`（CLI 载体） | ✅ 实机验证（2.1.0，2026-11-04：进程树替换 + 页面自动重连） | ✅ 同一实现（进程表用 CIM/PowerShell） |
 
 入口既不是 `dsh-desktop-host` 也不是 `@deepseek-ai/dsh` 时无法重启：bridge 返回
@@ -126,6 +126,18 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 
 ## 变更记录
 
+### 2.2.1
+
+- Windows：`stopTree` 不再用 `taskkill /T /F`。助手本身是被它要杀的宿主 spawn 出来的，`/T` 会把
+  助手一起杀掉、重启半途中断。现在按快照从叶子往根逐个 pid 杀。
+- Windows：desktop 退出路径增加强杀兜底。单独的 `taskkill /PID` 只会发 `WM_CLOSE`，而 DSH 关闭窗口
+  是隐藏到托盘、不会退出——旧代码会干等 90 秒后放弃（日志 "leaving the app alone"）。现在先礼貌关闭，
+  `QUIT_GRACE_MS`（8 秒）后强制关闭进程树。
+- Windows：2.2.1 已在 Windows 实机确认可用（2026-11-05）。
+- Windows：窗口恢复恢复可用。pid 之前作为 `-Command` 的尾随参数传入，PowerShell 会把它并入命令文本而
+  不是 `$args`，脚本于是去找 pid 0、以退出码 3 结束。现在改用 `DSH_RESTART_WINDOW_PID` 环境变量传递，
+  并且 `SetFocus` 失败不再影响结果。
+
 ### 2.1.0
 
 - 修复点「重启」后界面永远停在「正在等待新的进程接管…」：助手入口判定在 macOS 上因
@@ -141,9 +153,9 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 
 ## 已知限制
 
-- **Windows 上有两处融合改动**：退出方式从 `taskkill /T /F` 强杀改为先 `taskkill /PID` 礼貌关闭
-  （保留 DSH 自己的退出确认），拉起后额外要求新主进程持续存活 3 秒才算成功。其余（进程检测、
-  CIM 快照、直接 spawn、UIAutomation 窗口恢复）沿用 `0.2.1` 在 Windows 上实测通过的实现。
+- **Windows 退出路径**：先尝试 `taskkill /PID` 礼貌关闭（保留 DSH 自己弹确认的可能），但关窗口只会
+  隐藏到托盘，因此 `QUIT_GRACE_MS`（8 秒，可用 `DSH_RESTART_QUIT_GRACE_MS` 调整）后助手会强制关闭
+  整棵进程树；拉起后要求新主进程持续存活 3 秒才算成功。该路径已在 Windows 实机验证（2.2.1，2026-11-05）。
 - `--port 0` 启动的 `dsh web` 重启后会换端口，前端轮询用的是相对路径，只能提示手动访问新地址；
   默认固定端口时无此问题。
 - 桌面版重启必然中断当前会话/turn（进程整体退出）。

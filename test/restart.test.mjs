@@ -2,6 +2,7 @@
 // ordering, relaunch environments and app-process matching. These functions are
 // what makes the helper platform neutral, so they run on any host.
 import assert from 'node:assert'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -187,5 +188,44 @@ try {
 } finally {
   rmSync(directory, { recursive: true, force: true })
 }
+
+/* ------------------------------------------------- windows quit hardening */
+
+// 2.2.1: the helper is spawned by the very host it has to kill, so taskkill /T
+// would take the helper down midway through a Windows restart. Keep that out.
+const helperSource = readFileSync(new URL('../restart.mjs', import.meta.url), 'utf8')
+assert.ok(
+  !helperSource.includes("'taskkill', ['/PID', String(rootPid), '/T', '/F']"),
+  'stopTree must not use taskkill /T on Windows',
+)
+assert.ok(!helperSource.includes("'/T', '/F'"), 'no taskkill /T anywhere in the helper')
+assert.ok(helperSource.includes('QUIT_GRACE_MS'), 'Windows quit grace period is present')
+console.log('ok: Windows tree kill never uses taskkill /T')
+
+// A window close only hides DSH to the tray on Windows, so the polite close has
+// to be followed by a forced teardown. Assert the ordering in the source.
+const polite = helperSource.indexOf('asking ${target.mainPid} to close politely')
+const forced = helperSource.indexOf('DSH hides to the tray instead of quitting')
+assert.ok(polite > 0, 'polite close is logged')
+assert.ok(forced > polite, 'forced teardown follows the polite close')
+console.log('ok: Windows quit path escalates from polite close to forced teardown')
+
+// The numeric knobs must honour their environment overrides; checks run in a
+// child process because the constants are bound at import time.
+const probe = spawnSync(
+  process.execPath,
+  [
+    '-e',
+    "import(new URL('./restart.mjs', 'file://' + process.cwd() + '/')).then((m) => console.log(m.QUIT_GRACE_MS + ':' + m.CONFIRM_MS))",
+  ],
+  {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, DSH_RESTART_QUIT_GRACE_MS: '1234', DSH_RESTART_CONFIRM_MS: '2500' },
+    encoding: 'utf8',
+  },
+)
+assert.equal(probe.status, 0, `probe failed: ${probe.stderr}`)
+assert.equal(probe.stdout.trim(), '1234:2500')
+console.log('ok: timing knobs honour DSH_RESTART_* overrides')
 
 console.log('\nALL RESTART UNIT TESTS PASSED')
