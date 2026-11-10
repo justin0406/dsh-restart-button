@@ -105,22 +105,26 @@ try {
   // ---- 1b. the /var -> /private/var symlink must not turn the helper into a
   // no-op: when the copied helper is invoked through its TMPDIR path (which is
   // how the host half always invokes it), argv[1] is /var/... while
-  // import.meta.url resolves to /private/var/... ---------------------------------
-  const varDirectory = join(tmpdir(), 'dsh-restart-varpath-test')
-  rmSync(varDirectory, { recursive: true, force: true })
-  mkdirSync(varDirectory, { recursive: true })
-  const varHelper = join(varDirectory, 'restart.mjs')
-  copyFileSync(HELPER, varHelper)
-  assert.ok(varHelper.startsWith('/var/'), `the macOS TMPDIR must be a /var path (got ${varHelper})`)
-  const varHost = startFakeHost()
-  fakeHosts.push(varHost)
-  await sleep(300)
-  const varTarget = writeTarget(baseTarget(varHost.pid, { dryRun: true }))
-  const varRun = await runHelperAt(varHelper, varTarget)
-  assert.equal(varRun.code, 0, `helper must exit 0 when run from a /var path (stderr: ${varRun.stderr})`)
-  assert.match(readLog(), /helper start pid=\d+ mode=cli/u, 'invoking the helper through /var/... must still run it')
-  rmSync(varDirectory, { recursive: true, force: true })
-  console.log('ok: helper still runs when invoked through its /var TMPDIR path')
+  // import.meta.url resolves to /private/var/... This only exists on macOS.
+  if (process.platform === 'darwin') {
+    const varDirectory = join(tmpdir(), 'dsh-restart-varpath-test')
+    rmSync(varDirectory, { recursive: true, force: true })
+    mkdirSync(varDirectory, { recursive: true })
+    const varHelper = join(varDirectory, 'restart.mjs')
+    copyFileSync(HELPER, varHelper)
+    assert.ok(varHelper.startsWith('/var/'), `the macOS TMPDIR must be a /var path (got ${varHelper})`)
+    const varHost = startFakeHost()
+    fakeHosts.push(varHost)
+    await sleep(300)
+    const varTarget = writeTarget(baseTarget(varHost.pid, { dryRun: true }))
+    const varRun = await runHelperAt(varHelper, varTarget)
+    assert.equal(varRun.code, 0, `helper must exit 0 when run from a /var path (stderr: ${varRun.stderr})`)
+    assert.match(readLog(), /helper start pid=\d+ mode=cli/u, 'invoking the helper through /var/... must still run it')
+    rmSync(varDirectory, { recursive: true, force: true })
+    console.log('ok: helper still runs when invoked through its /var TMPDIR path')
+  } else {
+    console.log('skip: /var symlink case only applies to macOS')
+  }
 
   // ---- 2. real CLI restart: host tree is replaced by a live process ---------
   const host = startFakeHost()

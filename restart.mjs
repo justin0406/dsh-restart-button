@@ -10,7 +10,7 @@
  *   - desktop : the DSH desktop app (Electron shell + bundled desktop host)
  *   - cli     : `dsh web ...` running under a plain Node / Electron-as-node
  */
-import { realpathSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -86,6 +86,9 @@ export function parseWindowsProcessTable(text) {
   return table
 }
 
+/** Captured output above this is treated as a failed query, never truncated. */
+const MAX_CAPTURE_BYTES = 8_000_000
+
 export function runCapture(command, args, timeoutMs = 15_000) {
   return new Promise((resolve) => {
     let child
@@ -111,16 +114,30 @@ export function runCapture(command, args, timeoutMs = 15_000) {
     }, timeoutMs)
     child.stdout?.on('data', (chunk) => {
       out += chunk
-      if (out.length > 4_000_000) out = out.slice(-2_000_000)
+      // Truncating the middle out of a process table leaves unparseable JSON,
+      // which would then read as "every process is gone". A query we cannot
+      // trust has to fail loudly instead.
+      if (out.length > MAX_CAPTURE_BYTES) {
+        try {
+          child.kill('SIGKILL')
+        } catch {}
+        finish(undefined)
+      }
     })
     child.on('error', () => finish(undefined))
     child.on('close', (code) => finish(code === 0 ? out : undefined))
   })
 }
 
-export async function processTable(platform = PLATFORM) {
+/**
+ * Snapshot of the process table, or `null` when it could not be read.
+ *
+ * `null` is not an empty table: callers must treat it as "unknown" and keep
+ * waiting rather than conclude that the app is gone.
+ */
+export async function processTable(platform = PLATFORM, capture = runCapture) {
   if (platform === 'win32') {
-    const text = await runCapture(
+    const text = await capture(
       'powershell.exe',
       [
         '-NoProfile',
@@ -131,10 +148,16 @@ export async function processTable(platform = PLATFORM) {
         'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
       ],
     )
-    return parseWindowsProcessTable(text ?? '')
+    if (text === undefined) return null
+    const table = parseWindowsProcessTable(text)
+    return table.size === 0 ? null : table
   }
-  const text = await runCapture('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'args='])
-  return parsePosixProcessTable(text ?? '')
+  const text = await capture('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'args='])
+  if (text === undefined) return null
+  const table = parsePosixProcessTable(text)
+  // A real `ps -A` always contains at least init, so an empty parse means the
+  // output was unusable.
+  return table.size === 0 ? null : table
 }
 
 /** Children before parents, so that a tree can be signalled bottom-up. */
@@ -341,8 +364,11 @@ function signalPid(pid, signal) {
 /** Stop a process tree, leaves first.  Returns the pids that were signalled. */
 export async function stopTree(rootPid, log = () => {}, { signal = 'SIGTERM', graceMs = 4_000 } = {}) {
   const first = await processTable()
-  const order = descendantOrder(first, rootPid)
+  // An unreadable table means we cannot enumerate descendants; fall back to
+  // signalling the root itself rather than declaring the tree already gone.
+  const order = first === null ? [] : descendantOrder(first, rootPid)
   if (order.length === 0 && !pidAlive(rootPid)) return []
+  if (first === null) log(`process table unavailable; stopping ${rootPid} without its descendants`)
   log(`stopping process tree of ${rootPid} (${order.length} descendant(s))`)
   if (IS_WINDOWS) {
     // `taskkill /T` terminates every descendant of the root, and this helper
@@ -358,7 +384,7 @@ export async function stopTree(rootPid, log = () => {}, { signal = 'SIGTERM', gr
   const quiet = await waitFor(async () => !(await pidAlive(rootPid)) && (await appTableQuiet(order)), graceMs)
   if (!quiet) {
     const second = await processTable()
-    const sweep = descendantOrder(second, rootPid)
+    const sweep = second === null ? [] : descendantOrder(second, rootPid)
     log(`process tree of ${rootPid} ignored ${signal}; killing ${sweep.length} process(es)`)
     for (const pid of sweep) signalPid(pid, 'SIGKILL')
     signalPid(rootPid, 'SIGKILL')
@@ -455,10 +481,7 @@ async function requestQuit(target, log) {
     // chance to quit on its own, then force the tree down.
     log(`asking ${target.mainPid} to close politely`)
     await runCapture('taskkill', ['/PID', String(target.mainPid)])
-    const exited = await waitFor(async () => {
-      const table = await processTable()
-      return findMainProcesses(target, table).length === 0
-    }, QUIT_GRACE_MS, 250)
+    const exited = await waitFor(async () => (await mainProcessCount(target)) === 0, QUIT_GRACE_MS, 250)
     if (exited) {
       log('main process exited after the close request')
       return
@@ -469,14 +492,19 @@ async function requestQuit(target, log) {
     )
     if (Number.isInteger(target.hostPid) && target.hostPid > 0) await stopTree(target.hostPid, log)
     const table = await processTable()
-    for (const pid of findMainProcesses(target, table)) await stopTree(pid, log)
-    await waitFor(async () => {
-      const current = await processTable()
-      return findMainProcesses(target, current).length === 0
-    }, 8_000, 250)
+    // An unreadable table cannot tell us which pids to stop; the forced teardown
+    // below still reports whether anything survived.
+    for (const pid of table === null ? [] : findMainProcesses(target, table)) await stopTree(pid, log)
+    await waitFor(async () => (await mainProcessCount(target)) === 0, 8_000, 250)
     return
   }
   log(`unsupported platform ${PLATFORM}: not sending a quit request`)
+}
+
+/** Live main processes of the app, or `null` when the process table is unreadable. */
+async function mainProcessCount(target) {
+  const table = await processTable()
+  return table === null ? null : findMainProcesses(target, table).length
 }
 
 async function launchServicesRegistered(target) {
@@ -489,17 +517,19 @@ async function launchServicesRegistered(target) {
 /* ----------------------------------------------------------------- restart */
 
 async function restartDesktop(target, log) {
-  const mainAlive = async () => {
-    const table = await processTable()
-    return findMainProcesses(target, table).length > 0
-  }
+  // Both predicates count processes; `null` means the table was unreadable.
+  // The two comparisons are deliberately different:
+  //   - "does an instance already exist"  -> `!== 0`, so an unknown table makes
+  //     us assume it does and never launch a second copy;
+  //   - "did the new instance appear"     -> `> 0`, so an unknown table is not
+  //     accepted as proof and the wait keeps going.
   const appCount = async () => {
     const table = await processTable()
-    return findAppProcesses(target, table).length
+    return table === null ? null : findAppProcesses(target, table).length
   }
 
   await requestQuit(target, log)
-  const exited = await waitFor(async () => !(await mainAlive()), QUIT_WAIT_MS, 500)
+  const exited = await waitFor(async () => (await mainProcessCount(target)) === 0, QUIT_WAIT_MS, 500)
   if (!exited) {
     log(
       `main process is still alive ${Math.round(QUIT_WAIT_MS / 1000)}s after the quit request ` +
@@ -517,7 +547,7 @@ async function restartDesktop(target, log) {
   if (!settled) {
     log(`app still has processes after ${Math.round(SETTLE_MS / 1000)}s; sweeping what is left`)
     const table = await processTable()
-    const leftovers = findAppProcesses(target, table)
+    const leftovers = table === null ? [] : findAppProcesses(target, table)
     if (leftovers.length > 0) {
       const hostPid = target.hostPid
       for (const pid of leftovers) signalPid(pid, 'SIGKILL')
@@ -535,7 +565,7 @@ async function restartDesktop(target, log) {
   let attempts = 0
   for (let attempt = 1; attempt <= LAUNCH_TRIES; attempt += 1) {
     attempts = attempt
-    if (await mainAlive()) {
+    if ((await mainProcessCount(target)) !== 0) {
       log('a live DSH instance already exists; nothing to launch')
       return 0
     }
@@ -545,10 +575,10 @@ async function restartDesktop(target, log) {
     } catch (error) {
       log(`launch attempt ${attempt} failed to start: ${error?.message ?? error}`)
     }
-    const appeared = await waitFor(async () => await mainAlive(), LAUNCH_WAIT_MS, 250)
+    const appeared = await waitFor(async () => (await mainProcessCount(target)) > 0, LAUNCH_WAIT_MS, 250)
     if (!appeared) {
       log(`no live instance ${Math.round(LAUNCH_WAIT_MS / 1000)}s after attempt ${attempt}`)
-    } else if (await confirmAlive(mainAlive, CONFIRM_MS)) {
+    } else if (await confirmAlive(async () => (await mainProcessCount(target)) > 0, CONFIRM_MS)) {
       log(`relaunched ${target.appPath} (attempt ${attempt})`)
       await focusRestoredWindow(target, log)
       return 0
@@ -561,7 +591,7 @@ async function restartDesktop(target, log) {
   if (IS_MAC && target.appId !== undefined && target.appId !== null) {
     log('falling back to the bundle identifier')
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      if (await mainAlive()) {
+      if ((await mainProcessCount(target)) !== 0) {
         log('a live DSH instance already exists; nothing to launch')
         return 0
       }
@@ -571,8 +601,8 @@ async function restartDesktop(target, log) {
       } catch (error) {
         log(`bundle-id launch attempt ${attempt} failed to start: ${error?.message ?? error}`)
       }
-      const appeared = await waitFor(async () => await mainAlive(), LAUNCH_WAIT_MS, 250)
-      if (appeared && (await confirmAlive(mainAlive, CONFIRM_MS))) {
+      const appeared = await waitFor(async () => (await mainProcessCount(target)) > 0, LAUNCH_WAIT_MS, 250)
+      if (appeared && (await confirmAlive(async () => (await mainProcessCount(target)) > 0, CONFIRM_MS))) {
         log(`relaunched ${target.appId} (bundle-id attempt ${attempt})`)
         return 0
       }
@@ -586,6 +616,23 @@ async function restartDesktop(target, log) {
   return 1
 }
 
+/**
+ * Working directory for the replacement CLI.  A `cwd` recorded at restart time
+ * can be gone by the time the helper relaunches (the user deleted the project
+ * directory, or it was a temp dir); spawning into a missing directory fails
+ * with ENOENT, so fall back to HOME.
+ */
+export function resolveWorkingDirectory(cwd, log = () => {}) {
+  if (typeof cwd !== 'string' || cwd === '') return undefined
+  try {
+    if (statSync(cwd).isDirectory()) return cwd
+    log(`working directory ${cwd} is gone; relaunching from ${process.env.HOME ?? 'the default directory'}`)
+  } catch {
+    log(`working directory ${cwd} is unavailable; relaunching from ${process.env.HOME ?? 'the default directory'}`)
+  }
+  return process.env.HOME !== undefined && process.env.HOME !== '' ? process.env.HOME : undefined
+}
+
 async function restartCli(target, log) {
   const hostPid = target.hostPid
   if (Number.isInteger(hostPid) && hostPid > 0) {
@@ -594,6 +641,7 @@ async function restartCli(target, log) {
   }
   await sleep(400)
 
+  const cwd = resolveWorkingDirectory(target.cwd, log)
   for (let attempt = 1; attempt <= LAUNCH_TRIES; attempt += 1) {
     log(`launch attempt ${attempt}/${LAUNCH_TRIES}`)
     let child
@@ -601,7 +649,7 @@ async function restartCli(target, log) {
       child = spawn(target.appPath, Array.isArray(target.args) ? target.args : [], {
         detached: true,
         stdio: 'ignore',
-        cwd: target.cwd ?? undefined,
+        cwd,
         env: relaunchEnvironment('cli'),
         windowsHide: false,
       })
@@ -672,7 +720,10 @@ async function focusRestoredWindow(target, log) {
         log(`restored and focused the window of pid ${pid}`)
         return
       }
-      if (code === 2 || code === 3 || code === 5) return
+      // The script only ever exits 0 (focused), 3 (no window yet), 4 (window
+      // exists but exposes no WindowPattern) or 1 (PowerShell error).  Poll on
+      // 3 and 1; give up on 4, which retrying cannot fix.
+      if (code === 4) return
       await sleep(1_000)
     }
     log('could not restore the app window; continuing anyway')

@@ -237,6 +237,7 @@ let statusValue = {
   mainPid: 4000,
   appPath: '/Applications/DeepSeek Harness.app',
   appId: 'com.deepseek.dsh',
+  token: 'test-token-0123456789',
 }
 let statusStatus = 200
 let restartStatus = 202
@@ -320,7 +321,7 @@ const restartPost = requests.find((entry) => entry.url === '/api/dsh-restart/res
 assert.ok(restartPost, 'restart POST must be issued')
 assert.equal(restartPost.options.method, 'POST')
 assert.equal(restartPost.options.headers['content-type'], 'application/json')
-assert.equal(restartPost.options.body, '{}')
+assert.equal(restartPost.options.body, JSON.stringify({ token: 'test-token-0123456789' }), 'the restart must echo the status token')
 
 // Host still reports the old pid: no reload.
 let confirmView = await mount(Dialog, {})
@@ -335,6 +336,26 @@ for (let round = 0; round < 30 && reloads === 0; round += 1) {
 }
 assert.ok(reloads > 0, 'page must reload once the new host answers')
 console.log('ok: confirm restarts and reloads when the host pid changes')
+
+// 3b. Dry run: the host answers 200 with a plan and accepted:false. The dialog
+// must say so immediately instead of waiting two minutes for a new host.
+restartStatus = 200
+restartBody = { ok: true, value: { accepted: false, dryRun: true, plan: { mode: 'desktop' } } }
+statusValue = { ...statusValue, hostPid: 4242 }
+statusStatus = 200
+let footerForDryRun = await mount(FooterAction, { wide: true })
+const dryRunOpen = findAll(footerForDryRun.tree, (node) => node.type === 'button')[0]
+await dryRunOpen.props.onClick()
+await tick()
+let dryRunView = await mount(Dialog, {})
+await tick()
+const dryRunConfirm = findAll(dryRunView.tree, (node) => node.props?.['data-dsh-restart-confirm'] === '')[0]
+assert.ok(dryRunConfirm, 'dry-run case must offer the confirm button')
+await dryRunConfirm.props.onClick()
+await tick()
+dryRunView = await mount(Dialog, {})
+assert.match(treeText(dryRunView.tree), /干跑模式/u, 'dry run must be reported, not waited on')
+console.log('ok: dry run reports itself instead of waiting for a new host')
 
 // 4. Rejected restart -> the dialog shows the error and stays retryable.
 const callsBefore = requests.length

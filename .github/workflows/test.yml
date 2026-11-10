@@ -1,0 +1,49 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The suites have no dependencies: they run against the checkout itself.
+      - name: Run test suites
+        run: npm test
+
+      - name: Verify the published file set
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const [info] = require("./pack.json")
+            const names = info.files.map((file) => file.path).sort()
+            const required = ["LICENSE", "README.md", "README.zh-CN.md", "client.js", "index.js", "package.json", "restart.mjs"]
+            const missing = required.filter((name) => !names.includes(name))
+            if (missing.length > 0) {
+              console.error("missing from the tarball:", missing.join(", "))
+              process.exit(1)
+            }
+            if (names.some((name) => name.startsWith("test/"))) {
+              console.error("tests must not be published")
+              process.exit(1)
+            }
+            console.log("tarball contains", names.length, "files")
+          '

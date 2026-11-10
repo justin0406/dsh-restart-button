@@ -55,6 +55,37 @@ assert.equal(restart.parseWindowsProcessTable('not json').size, 0)
 assert.equal(restart.parseWindowsProcessTable('').size, 0)
 console.log('ok: windows process table parsing (array, single object, garbage)')
 
+/* -------------------------------------------------- unreadable process table */
+
+// A table that could not be read is *unknown*, never empty: callers use `null`
+// to keep waiting instead of concluding that the app is gone. `ps` is invoked
+// with a bogus flag so the query really fails.
+const realRunCapture = restart.runCapture
+assert.equal(typeof realRunCapture, 'function')
+
+// A capture that overflows must fail instead of being truncated into
+// unparseable JSON that then reads as "no processes at all".
+const overflow = await restart.runCapture(
+  process.execPath,
+  ['-e', "process.stdout.write('x'.repeat(20 * 1024 * 1024))"],
+  20_000,
+)
+assert.equal(overflow, undefined, 'an oversized capture must fail, not truncate')
+
+// A command that exits non-zero (or is missing) also yields undefined, which
+// processTable turns into null.
+const failed = await restart.runCapture('/nonexistent/binary-for-dsh-restart-test', [])
+assert.equal(failed, undefined, 'a failing command must not be reported as empty output')
+console.log('ok: an oversized or failing capture reports unknown, not empty')
+
+// processTable maps every unusable capture to null rather than an empty map.
+assert.equal(await restart.processTable('darwin', async () => undefined), null, 'a failed query is unknown')
+assert.equal(await restart.processTable('darwin', async () => ''), null, 'unparseable output is unknown')
+assert.equal(await restart.processTable('win32', async () => 'not json'), null, 'broken JSON is unknown')
+const usable = await restart.processTable('darwin', async () => '  1   0 /sbin/launchd\n')
+assert.equal(usable.size, 1, 'a usable table is returned as-is')
+console.log('ok: processTable reports null for every unusable capture')
+
 /* -------------------------------------------------------- descendants order */
 
 const tree = new Map([
@@ -209,6 +240,32 @@ const forced = helperSource.indexOf('DSH hides to the tray instead of quitting')
 assert.ok(polite > 0, 'polite close is logged')
 assert.ok(forced > polite, 'forced teardown follows the polite close')
 console.log('ok: Windows quit path escalates from polite close to forced teardown')
+
+// The window-restore loop must give up on exit code 4 (no WindowPattern) and
+// keep polling on 3 (window not there yet). The old table waited on 4 and
+// bailed on 3, which meant a successful restart spun for 90 s.
+const giveUp = /if \(code === 4\) return/u
+assert.ok(giveUp.test(helperSource), 'window restore must stop retrying on exit code 4')
+assert.ok(!/code === 3 \|\|/u.test(helperSource), 'window restore must keep polling on exit code 3')
+assert.ok(!/code === 5/u.test(helperSource), 'exit code 5 is not produced by the script')
+console.log('ok: window restore retries on 3 and gives up on 4')
+
+/* -------------------------------------------------- relaunch working directory */
+
+const cwdDirectory = mkdtempSync(join(tmpdir(), 'dsh-restart-cwd-'))
+try {
+  assert.equal(restart.resolveWorkingDirectory(cwdDirectory), cwdDirectory, 'a live directory is kept')
+  const gone = restart.resolveWorkingDirectory(join(cwdDirectory, 'deleted'))
+  assert.equal(gone, process.env.HOME, 'a missing directory falls back to HOME')
+  assert.equal(restart.resolveWorkingDirectory(undefined), undefined, 'no recorded cwd stays undefined')
+  assert.equal(restart.resolveWorkingDirectory(''), undefined)
+  const lines = []
+  restart.resolveWorkingDirectory(join(cwdDirectory, 'deleted'), (line) => lines.push(line))
+  assert.match(lines.join('\n'), /relaunching from/u, 'the fallback is logged')
+  console.log('ok: relaunch cwd falls back to HOME when it disappeared')
+} finally {
+  rmSync(cwdDirectory, { recursive: true, force: true })
+}
 
 // The numeric knobs must honour their environment overrides; checks run in a
 // child process because the constants are bound at import time.

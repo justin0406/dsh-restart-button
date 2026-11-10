@@ -20,7 +20,8 @@
  * in Node mode, where it exited within ~100ms without opening a window.
  */
 import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { platform as osPlatform, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,10 +37,17 @@ const MAX_DELAY_MS = 10_000
 const MAX_BODY_BYTES = 16 * 1024
 const RESTART_GUARD_MS = 90_000
 const HELPER_START_TIMEOUT_MS = 1_200
+/** Helper logs and orphaned task files older than this are swept on startup. */
+const TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000
 
 const DESKTOP_HOST_ENTRY = /[\\/]@deepseek-ai[\\/]dsh-desktop-host[\\/]lib[\\/](?:index|main)\.(?:js|mjs|cjs)$/
 const DSH_PACKAGE_ENTRY = /[\\/]@deepseek-ai[\\/]dsh[\\/]lib[\\/][^\\/]+\.(?:js|mjs|cjs)$/
-const CLI_ENTRY = /(?:^|[\\/])(?:cli|main|startup|bin|dsh|web)\.(?:js|mjs|cjs)$/
+/**
+ * A CLI carrier: `@deepseek-ai/dsh` under `node_modules`, or a `dsh`-named
+ * executable. The name alone is not enough — `/home/x/dsh-notes/main.js` must
+ * not be mistaken for a carrier.
+ */
+const CLI_ENTRY = /(?:^|[\\/])@deepseek-ai[\\/]dsh[\\/]|(?:^|[\\/])dsh(?:\.(?:js|mjs|cjs))?$/
 
 const HELPER_SOURCE = fileURLToPath(new URL('./restart.mjs', import.meta.url))
 const HELPER_DIRECTORY = join(tmpdir(), 'dsh-restart')
@@ -151,7 +159,7 @@ export function detectTarget(options = {}) {
     }
   }
 
-  const cli = DSH_PACKAGE_ENTRY.test(entryText) || (CLI_ENTRY.test(entryText) && entryText.includes('dsh'))
+  const cli = DSH_PACKAGE_ENTRY.test(entryText) || CLI_ENTRY.test(entryText)
   if (forced === 'cli' || (forced === '' && cli && ppid > 1)) {
     return {
       mode: 'cli',
@@ -162,6 +170,9 @@ export function detectTarget(options = {}) {
       mainPid: null,
       hostPid: pid,
       args: argv.slice(1),
+      // The replacement inherits the carrier's working directory so relative
+      // paths in argv keep resolving; the helper falls back to HOME if it is gone.
+      cwd: options.cwd ?? process.cwd(),
       launchEnvironment: 'inherited (node / electron-as-node)',
       diagnostics,
     }
@@ -226,8 +237,12 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
+        // Do not destroy the socket here: `req` and `res` share it, so tearing
+        // it down would swallow the 413 the caller is about to write. Stop
+        // reading and let the handler answer; the body is discarded.
+        req.removeAllListeners('data')
+        if (typeof req.resume === 'function') req.resume()
         reject(new Error('body-too-large'))
-        req.destroy()
         return
       }
       chunks.push(chunk)
@@ -296,6 +311,35 @@ function ensureHelperScript() {
   return destination
 }
 
+/**
+ * Remove helper logs and orphaned task files left behind by earlier runs.
+ *
+ * A helper that dies before it finishes never deletes its own `target-*.json`,
+ * and every restart writes a fresh log, so the directory would grow without
+ * bound. Only files older than a week are touched, so a restart that is still
+ * in flight is never disturbed.
+ */
+export function sweepHelperDirectory(directory = HELPER_DIRECTORY, maxAgeMs = TEMP_MAX_AGE_MS) {
+  let entries
+  try {
+    entries = readdirSync(directory)
+  } catch {
+    return 0
+  }
+  const cutoff = Date.now() - maxAgeMs
+  let removed = 0
+  for (const entry of entries) {
+    if (!/^(?:restart-.*\.log|target-.*\.json)$/.test(entry)) continue
+    const path = join(directory, entry)
+    try {
+      if (statSync(path).mtimeMs >= cutoff) continue
+      unlinkSync(path)
+      removed += 1
+    } catch {}
+  }
+  return removed
+}
+
 export function buildTargetFile(target, settings) {
   return {
     mode: target.mode,
@@ -305,6 +349,7 @@ export function buildTargetFile(target, settings) {
     appId: target.appId ?? null,
     mainBinary: target.mainBinary ?? null,
     args: target.args ?? [],
+    cwd: target.cwd ?? null,
     logPath: settings.logPath,
     delayMs: settings.delayMs,
     dryRun: settings.dryRun === true,
@@ -353,6 +398,9 @@ export function apply(ctx, config) {
   }
   const webServer = ctx.webServer
   const state = { restarting: false, lastRequest: null, guardTimer: undefined }
+  // Handed out by `status` and required by `restart`, so a cross-site form post
+  // that carries neither `Origin` nor `Sec-Fetch-Site` cannot trigger a restart.
+  const token = randomUUID()
 
   const settings = (override = {}) => {
     const dryRun = override.dryRun === true || config?.dryRun === true || process.env.DSH_RESTART_DRY_RUN === '1'
@@ -374,6 +422,7 @@ export function apply(ctx, config) {
       restarting: state.restarting,
       lastRequest: state.lastRequest,
       logDirectory: HELPER_DIRECTORY,
+      token,
     }
   }
 
@@ -406,6 +455,10 @@ export function apply(ctx, config) {
         },
       }
     }
+    // Claim the slot before the first await: spawning the helper takes up to
+    // HELPER_START_TIMEOUT_MS, and a second click inside that window would
+    // otherwise start a second helper.
+    state.restarting = true
     try {
       const scriptPath = ensureHelperScript()
       const targetPath = writeTargetFile(target, resolved)
@@ -414,6 +467,7 @@ export function apply(ctx, config) {
         try {
           unlinkSync(targetPath)
         } catch {}
+        state.restarting = false
         log('error', 'restart helper exited before it started', {
           helperPid: started.pid,
           logPath: resolved.logPath,
@@ -430,7 +484,6 @@ export function apply(ctx, config) {
         }
       }
       const helperPid = started.pid
-      state.restarting = true
       state.lastRequest = {
         at: new Date().toISOString(),
         mode: target.mode,
@@ -489,6 +542,8 @@ export function apply(ctx, config) {
   }
 
   return ctx.effect(() => {
+    const swept = sweepHelperDirectory()
+    if (swept > 0) log('info', 'swept stale helper files', { removed: swept, directory: HELPER_DIRECTORY })
     const disposers = []
     disposers.push(
       webServer.register({
@@ -513,6 +568,13 @@ export function apply(ctx, config) {
                 if (error?.message === 'invalid-body' || error?.message === 'body-too-large') throw error
                 body = {}
               }
+            }
+            // The token is defence in depth on top of isTrustedRequest: it stops
+            // a cross-site form post from a browser that sends neither `Origin`
+            // nor `Sec-Fetch-Site`. It must be the one `status` just handed out.
+            if (body.token !== token) {
+              fail(res, 403, 'bridge/bad-token', 'Fetch the status endpoint first; its token is required.')
+              return
             }
             const result = await restart(body)
             sendJson(res, result.status, result.body)

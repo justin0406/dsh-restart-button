@@ -70,12 +70,15 @@ treated as "the restart worked". Therefore the plugin:
 
 | Method | Path | Notes |
 |---|---|---|
-| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory}}` |
-| POST | `/api/dsh-restart/restart` | 202 accepted; 202 `alreadyRequested` for duplicates; 409 `restart/unsupported`; 200 `plan` in dry run; 500 `restart/spawn-failed` / `restart/helper-exited` |
+| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory,token}}` |
+| POST | `/api/dsh-restart/restart` | 202 accepted; 202 `alreadyRequested` for duplicates; 409 `restart/unsupported`; 200 `plan` in dry run; 403 `bridge/bad-token`; 500 `restart/spawn-failed` / `restart/helper-exited` |
 
 Security: loopback peers only; the `Host` header must be a loopback name; `sec-fetch-site: cross-site`
 is rejected; `Origin` must be absent, `null`, `dsh-app://app`, or `webServer.getOrigin()`; mutating
-calls must be POST; bodies are capped at 16 KiB. Requests from the LAN or a phone browser get 403.
+calls must be POST; bodies are capped at 16 KiB. On top of that, `POST /restart` must echo the
+`token` that `GET /status` just handed out — that closes the remaining hole for browsers that send
+neither `Origin` nor `Sec-Fetch-Site` (Safari before 16.4), where a cross-site form post would
+otherwise look like a same-origin request. Requests from the LAN or a phone browser get 403.
 
 ## Logs
 
@@ -86,16 +89,35 @@ calls must be POST; bodies are capped at 16 KiB. Requests from the LAN or a phon
 |---|---|
 | `helper start` | helper started; includes mode / hostPid / mainPid / app path |
 | `leaving the app alone` | the main process never exited (usually the quit confirmation was cancelled); nothing was done |
-| `app torn down after` | every process of the app/install directory is gone |
-| `relaunch attempt i/N` | launch attempt i |
+| `app torn down` | every process of the app/install directory is gone |
+| `launch attempt i/N` | launch attempt i |
+| `bundle-id launch attempt i/2` | macOS fallback launch through the bundle identifier |
 | `instance came up and exited again` | the new instance started and died again (environment or single-instance lock); retrying |
 | `relaunched ... (attempt i)` | success, and the new main process is stable |
+| `relaunched DSH as pid N` | CLI mode: the replacement process started |
+| `working directory ... is gone` | the recorded cwd disappeared; the CLI was relaunched from `HOME` |
+| `process table unavailable` | `ps`/PowerShell could not be read; the helper stopped the root without its descendants instead of assuming everything was already gone |
 | `relaunch FAILED` | every attempt failed; open the app manually |
+
+Logs and orphaned `target-*.json` files older than a week are swept when the plugin starts.
 
 ## Dry run
 
 Set `DSH_RESTART_DRY_RUN=1`, or `config: { dryRun: true }` in the bundle patch: `POST /restart` only
-returns the target file it would write and neither kills nor launches anything.
+returns the target file it would write and neither kills nor launches anything. The dialog reports
+that nothing was restarted instead of waiting for a new host.
+
+## Environment switches
+
+| Variable | Effect |
+|---|---|
+| `DSH_RESTART_MODE` | `desktop`, `cli`, or `off`. Forces the carrier shape, or disables the bridge entirely (`status` reports `disabled-by-mode`, `restart` answers 409). |
+| `DSH_RESTART_DRY_RUN` | `1` = dry run (see above). |
+| `DSH_RESTART_QUIT_WAIT_MS` / `_QUIT_GRACE_MS` / `_SETTLE_MS` / `_PAUSE_MS` / `_CONFIRM_MS` / `_LAUNCH_WAIT_MS` / `_LAUNCH_TRIES` / `_PROCESS_WAIT_MS` | Timing knobs, read by the helper at startup. |
+| `DSH_RESTART_OPEN_BIN` | Overrides `/usr/bin/open` (macOS only; used by tests). |
+
+All `DSH_RESTART_*` variables are passed through the clean LaunchServices environment, so they reach
+the helper even in desktop mode.
 
 ## Tests
 
@@ -106,13 +128,17 @@ npm test        # no dependencies required
 Four suites:
 
 - `test/restart.test.mjs` — pure functions (macOS/Windows process-table parsing, descendant order,
-  environment cleaning, app-process matching, logging).
-- `test/host.test.mjs` — route registration, loopback/Origin/method/body validation, macOS/Windows
-  carrier detection, unsupported platforms, target-file shape.
+  environment cleaning, app-process matching, logging) plus the "an unreadable process table is
+  unknown, never empty" contract.
+- `test/host.test.mjs` — route registration, loopback/Origin/method/body validation, the status token,
+  macOS/Windows carrier detection, unsupported platforms, target-file shape.
 - `test/client.test.mjs` — mounts the real components with a tiny React (slots, dialog, confirm,
-  reload after the host pid changes, error states, i18n).
+  reload after the host pid changes, dry run, error states, i18n).
 - `test/helper.test.mjs` — actually runs `restart.mjs` against a fake CLI process tree and checks that
   it kills only what it should and confirms the replacement.
+
+CI runs all four on macOS and Linux with Node 20 and 22 (`.github/workflows/test.yml`). The
+`/var` vs `/private/var` case is macOS-only and skips elsewhere.
 
 ## Install
 
@@ -145,6 +171,30 @@ silently and does nothing, which looks like "the button waits forever". The help
 `realpathSync` on both sides, and `test/helper.test.mjs` locks this in with a `/var`-path case.
 
 ## Changelog
+
+### 2.3.0
+
+- An unreadable process table is now treated as **unknown**, not as "the app is gone". Captures that
+  overflow 8 MB used to be truncated into unparseable JSON, and a failing `ps`/PowerShell query
+  returned an empty table; both made the helper believe the old instance had exited, so it could
+  launch a second copy (single-instance lock failure) or leave orphaned children holding the port.
+  `processTable()` now returns `null`, and every predicate treats that as "keep waiting".
+- Windows window restore no longer spins for 90 s after a successful restart: the loop polls on exit
+  code 3 (window not there yet) and gives up on 4 (no `WindowPattern`), which is what the script
+  actually produces. Codes 2 and 5 were unreachable.
+- `413` responses are delivered again. The body reader destroyed the socket before the handler could
+  answer, so an oversized request surfaced as a network error instead of `bridge/body-too-large`.
+- `POST /restart` now requires the `token` that `GET /status` hands out (`bridge/bad-token`
+  otherwise). Defence in depth for browsers that send neither `Origin` nor `Sec-Fetch-Site`.
+- A second click inside the helper-start window no longer starts a second helper: `restarting` is
+  claimed before the first `await`.
+- CLI mode records the carrier's working directory and falls back to `HOME` if it has disappeared, so
+  a restart no longer fails with `ENOENT` after the project directory was deleted.
+- Dry run is reported in the dialog instead of waiting two minutes for a host that will never come.
+- Carrier detection no longer fires on paths that merely contain `dsh`
+  (`/home/x/dsh-notes/main.js`); only `@deepseek-ai/dsh` or a `dsh`-named executable counts.
+- Helper logs and orphaned `target-*.json` files older than a week are swept at startup.
+- Added CI (macOS + Linux, Node 20/22) and documented every `DSH_RESTART_*` switch.
 
 ### 2.2.1
 

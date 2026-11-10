@@ -40,6 +40,7 @@ function makeReq({ method = 'GET', headers = {}, body = null, address = '127.0.0
   req.headers = { host: '127.0.0.1:53556', ...headers }
   req.socket = { remoteAddress: address }
   req.destroy = () => {}
+  req.resume = () => {}
   queueMicrotask(() => {
     if (body !== null) req.emit('data', Buffer.from(body, 'utf8'))
     req.emit('end')
@@ -133,7 +134,22 @@ const cli = detect({
 })
 assert.equal(cli.mode, 'cli')
 assert.deepEqual(cli.args, ['/opt/dsh/node_modules/@deepseek-ai/dsh/lib/cli.js', 'web', '--port', '3080'])
+assert.equal(cli.cwd, process.cwd(), 'the CLI carrier records its working directory for the relaunch')
 console.log('ok: dsh cli carrier detected')
+
+// A path that merely contains "dsh" is not a carrier; only the package or a
+// `dsh`-named executable counts.
+for (const entry of [
+  '/home/x/dsh-notes/main.js',
+  '/home/x/notdsh/web.js',
+  '/opt/work/dsh-helper/cli.js',
+]) {
+  const decoy = detect({ argv: ['node', entry], execPath: '/usr/local/bin/node' })
+  assert.equal(decoy.mode, undefined, `${entry} must not be treated as a carrier`)
+}
+const namedBinary = detect({ argv: ['node', '/usr/local/bin/dsh', 'web'], execPath: '/usr/local/bin/node' })
+assert.equal(namedBinary.mode, 'cli', 'a dsh-named executable is a carrier')
+console.log('ok: CLI detection does not fire on paths that merely contain "dsh"')
 
 const unsupported = detect({ platform: 'linux' })
 assert.equal(unsupported.mode, undefined)
@@ -162,7 +178,10 @@ assert.equal(body.value.reason, 'not-a-dsh-carrier')
 assert.ok(Array.isArray(body.value.inheritedNodeMode))
 assert.equal(typeof body.value.delayMs, 'number')
 assert.equal(typeof body.value.logDirectory, 'string')
-console.log('ok: status reports the plain-node diagnostics')
+assert.equal(typeof body.value.token, 'string', 'status must hand out the CSRF token')
+assert.ok(body.value.token.length >= 16)
+const token = body.value.token
+console.log('ok: status reports the plain-node diagnostics and a token')
 
 res = await call('/api/dsh-restart/status', { method: 'POST', body: '{}' })
 assert.equal(res.statusCode, 200)
@@ -203,7 +222,25 @@ assert.equal(res.statusCode, 400)
 assert.equal(res.json().error.code, 'bridge/invalid-body')
 console.log('ok: malformed JSON body is rejected')
 
+// A body over the 16 KiB cap is refused, and the 413 must actually reach the
+// client (the reader used to destroy the socket before answering).
+res = await call('/api/dsh-restart/restart', { method: 'POST', body: JSON.stringify({ pad: 'x'.repeat(20_000) }) })
+assert.equal(res.statusCode, 413, `oversized body must answer 413, got ${res.statusCode}: ${res.body}`)
+assert.equal(res.json().error.code, 'bridge/body-too-large')
+console.log('ok: oversized body answers 413 instead of dropping the connection')
+
+// The token is mandatory: without it the restart never reaches the target check.
 res = await call('/api/dsh-restart/restart', { method: 'POST', body: '{}' })
+assert.equal(res.statusCode, 403)
+assert.equal(res.json().error.code, 'bridge/bad-token')
+console.log('ok: restart without the status token is refused')
+
+res = await call('/api/dsh-restart/restart', { method: 'POST', body: JSON.stringify({ token: 'wrong' }) })
+assert.equal(res.statusCode, 403)
+assert.equal(res.json().error.code, 'bridge/bad-token')
+console.log('ok: restart with a forged token is refused')
+
+res = await call('/api/dsh-restart/restart', { method: 'POST', body: JSON.stringify({ token }) })
 assert.equal(res.statusCode, 409)
 assert.equal(res.json().error.code, 'restart/unsupported')
 assert.ok(res.json().diagnostics, 'unsupported must carry diagnostics')
@@ -231,6 +268,7 @@ assert.deepEqual(plan, {
   appId: 'com.deepseek.dsh',
   mainBinary: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
   args: [],
+  cwd: null,
   logPath: '/tmp/dsh-restart/restart-1.log',
   delayMs: 900,
   dryRun: true,

@@ -28,6 +28,7 @@ window.__ModuleLoader__.load({
       'dialog.cancel': '取消',
       'dialog.close': '关闭',
       'dialog.unsupported': '当前运行环境无法自行重启，请手动退出后重新打开。',
+      'dialog.dryRun': '当前处于干跑模式，没有真的重启（详见主机日志）。',
       'error.forbidden': '请求被拒绝：只允许本机页面调用。',
       'error.spawn': '助手启动失败，未能执行重启。',
       'error.reloadTimeout': '等待超时，请手动刷新页面或重新打开应用。',
@@ -49,6 +50,7 @@ window.__ModuleLoader__.load({
       'dialog.cancel': 'Cancel',
       'dialog.close': 'Close',
       'dialog.unsupported': 'This runtime cannot restart itself; quit and reopen the app manually.',
+      'dialog.dryRun': 'Dry-run mode is on: nothing was restarted (see the host log).',
       'error.forbidden': 'Request refused: only local pages may call this.',
       'error.spawn': 'The helper could not be started, so nothing was restarted.',
       'error.reloadTimeout': 'Timed out. Reload the page or reopen the app manually.',
@@ -142,16 +144,30 @@ window.__ModuleLoader__.load({
 
     const requestRestart = async (t) => {
       const previousHostPid = store.status?.hostPid ?? null
+      // The token comes from the `status` probe the dialog already made; the
+      // host refuses a restart that does not echo it back.
+      const token = store.status?.token
       patch({ phase: 'starting', error: null, errorDetail: null, slow: false })
       let result
       try {
-        result = await callBridge('restart', {})
+        result = await callBridge('restart', { token })
       } catch {
         patch({ phase: 'error', error: t('error.generic'), errorDetail: 'network', slow: false })
         return
       }
       if (result.status !== 202 && result.status !== 200) {
         patch({ phase: 'error', error: describeFailure(t, result), errorDetail: result.body?.error?.code ?? null, slow: false })
+        return
+      }
+      // A dry run answers 200 with `accepted: false` and a plan; nothing was
+      // restarted, so waiting for a new host would just time out.
+      if (result.body?.value?.dryRun === true && result.body?.value?.accepted !== true) {
+        patch({
+          phase: 'error',
+          error: t('dialog.dryRun'),
+          errorDetail: 'restart/dry-run',
+          slow: false,
+        })
         return
       }
       patch({ phase: 'waiting' })

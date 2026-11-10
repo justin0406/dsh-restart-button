@@ -59,11 +59,13 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory}}` |
-| POST | `/api/dsh-restart/restart` | 202 已接受；重复请求 202 `alreadyRequested`；不可重启 409 `restart/unsupported`；干跑 200 `plan`；失败 500 `restart/spawn-failed` / `restart/helper-exited` |
+| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory,token}}` |
+| POST | `/api/dsh-restart/restart` | 202 已接受；重复请求 202 `alreadyRequested`；不可重启 409 `restart/unsupported`；干跑 200 `plan`；token 不符 403 `bridge/bad-token`；失败 500 `restart/spawn-failed` / `restart/helper-exited` |
 
 安全约束：只接受回环地址；`Host` 头必须是回环名；拒绝 `sec-fetch-site: cross-site`；`Origin` 只允许
 缺省、`null`、`dsh-app://app` 或 `webServer.getOrigin()`；写操作只接受 POST；请求体上限 16 KiB。
+此外 `POST /restart` 必须回传 `GET /status` 下发的 `token`——这补上了最后一种情况：既不发送
+`Origin` 也不发送 `Sec-Fetch-Site` 的浏览器（Safari 16.4 之前）里，跨站表单 POST 会被当成同源请求。
 局域网/手机浏览器访问会被 403 拒绝。
 
 ## 日志
@@ -77,16 +79,34 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
 |---|---|
 | `helper start` | 助手启动，包含 mode / hostPid / mainPid / app 路径 |
 | `leaving the app alone` | 主进程一直没退出（通常是退出确认框被取消），插件没有动它 |
-| `app torn down after` | 整个 App/安装目录的进程都退干净了 |
-| `relaunch attempt i/N` | 第 i 次拉起 |
+| `app torn down` | 整个 App/安装目录的进程都退干净了 |
+| `launch attempt i/N` | 第 i 次拉起 |
+| `bundle-id launch attempt i/2` | macOS 兜底：按 bundle id 拉起 |
 | `instance came up and exited again` | 新实例起来又退出（环境或单实例锁问题），会继续重试 |
 | `relaunched ... (attempt i)` | 成功，且新主进程已持续存活 |
+| `relaunched DSH as pid N` | CLI 模式：替换进程已启动 |
+| `working directory ... is gone` | 记录的工作目录已消失，CLI 改从 `HOME` 拉起 |
+| `process table unavailable` | `ps`/PowerShell 读不到进程表；助手只停根进程，不假设其余进程已消失 |
 | `relaunch FAILED` | 全部尝试失败，需手动打开 |
+
+插件启动时会清理超过一周的日志与残留 `target-*.json`。
 
 ## 干跑
 
 `DSH_RESTART_DRY_RUN=1`（环境变量）或 bundle patch 里 `config: { dryRun: true }`：
-`POST /restart` 只返回将要写出的任务文件，不杀进程、不拉起。
+`POST /restart` 只返回将要写出的任务文件，不杀进程、不拉起。弹窗会直接说明「没有真的重启」，
+不会去等一个永远不会出现的新 Host。
+
+## 环境开关
+
+| 变量 | 作用 |
+|---|---|
+| `DSH_RESTART_MODE` | `desktop` / `cli` / `off`。强制指定载体形态，或彻底停用 bridge（`status` 报 `disabled-by-mode`，`restart` 返回 409）。 |
+| `DSH_RESTART_DRY_RUN` | `1` = 干跑。 |
+| `DSH_RESTART_QUIT_WAIT_MS` / `_QUIT_GRACE_MS` / `_SETTLE_MS` / `_PAUSE_MS` / `_CONFIRM_MS` / `_LAUNCH_WAIT_MS` / `_LAUNCH_TRIES` / `_PROCESS_WAIT_MS` | 各阶段超时与重试次数，助手启动时读取。 |
+| `DSH_RESTART_OPEN_BIN` | 覆盖 `/usr/bin/open`（仅 macOS，测试用）。 |
+
+所有 `DSH_RESTART_*` 变量都会穿过干净环境传给助手，桌面模式下同样生效。
 
 ## 测试
 
@@ -94,10 +114,16 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
 npm test        # 四套测试，无需安装依赖
 ```
 
-- `test/restart.test.mjs`：纯函数（macOS/Windows 进程表解析、进程树倒序、环境清洗、App 进程匹配、日志）。
-- `test/host.test.mjs`：路由注册、回环/Origin/方法与请求体校验、macOS/Windows 载体识别、非支持平台拒绝、任务文件结构。
-- `test/client.test.mjs`：用迷你 React 渲染真实组件（插槽、弹窗、确认、等待 hostPid 变化后刷新、错误态、i18n）。
+- `test/restart.test.mjs`：纯函数（macOS/Windows 进程表解析、进程树倒序、环境清洗、App 进程匹配、日志），
+  以及「读不到的进程表是未知、不是空」这一契约。
+- `test/host.test.mjs`：路由注册、回环/Origin/方法与请求体校验、status token、macOS/Windows 载体识别、
+  非支持平台拒绝、任务文件结构。
+- `test/client.test.mjs`：用迷你 React 渲染真实组件（插槽、弹窗、确认、等待 hostPid 变化后刷新、干跑、
+  错误态、i18n）。
 - `test/helper.test.mjs`：真实运行 `restart.mjs` 替换一个假 CLI 进程树，验证只杀该杀的、拉起后确认存活。
+
+CI 在 macOS 与 Linux、Node 20/22 上跑全部四套（`.github/workflows/test.yml`）。`/var` 与
+`/private/var` 的用例仅限 macOS，其他平台跳过。
 
 ## 安装 / 卸载
 
@@ -125,6 +151,25 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 现在改用 `realpathSync` 比较两侧，并在 `test/helper.test.mjs` 里用一个 `/var` 路径的用例锁住这个行为。
 
 ## 变更记录
+
+### 2.3.0
+
+- 读不到的进程表现在按**未知**处理，不再当成「App 已经退出」。超过 8 MB 的输出原先会被截尾成无法
+  解析的 JSON，`ps`/PowerShell 查询失败也会返回空表——两者都会让助手误判旧实例已退出，从而重复拉起
+  （撞单实例锁）或留下占着端口的子进程。`processTable()` 现在返回 `null`，所有谓词把 `null` 当「继续等」。
+- Windows 窗口恢复在重启成功后不再空转 90 秒：循环改为在 exit code 3（窗口还没出来）继续轮询、
+  exit code 4（拿不到 `WindowPattern`）放弃——这才是脚本真实会返回的码，原来的 2 和 5 不可达。
+- `413` 能正常送达了。原先请求体读取器在处理器答复前就销毁了 socket，超限请求表现为网络错误而不是
+  `bridge/body-too-large`。
+- `POST /restart` 现在要求回传 `GET /status` 下发的 `token`（否则 `bridge/bad-token`），作为既不发送
+  `Origin` 也不发送 `Sec-Fetch-Site` 的浏览器场景下的纵深防御。
+- 助手启动窗口内再点一次不会起第二个助手：`restarting` 在第一个 `await` 之前就置位。
+- CLI 模式记录载体的工作目录，目录消失时回退到 `HOME`，避免项目目录被删后重启以 `ENOENT` 失败。
+- 干跑会在弹窗里直接说明，不再干等一个永远不会出现的新 Host 两分钟。
+- 载体识别不再被路径里含 `dsh` 的脚本误触发（如 `/home/x/dsh-notes/main.js`），只认 `@deepseek-ai/dsh`
+  或名为 `dsh` 的可执行文件。
+- 插件启动时清理超过一周的助手日志与残留 `target-*.json`。
+- 新增 CI（macOS + Linux，Node 20/22），并把所有 `DSH_RESTART_*` 开关写进文档。
 
 ### 2.2.1
 
