@@ -174,7 +174,13 @@ assert.equal(res.statusCode, 200)
 let body = res.json()
 assert.equal(body.ok, true)
 assert.equal(body.value.supported, false, 'the test process is not a restartable carrier')
-assert.equal(body.value.reason, 'not-a-dsh-carrier')
+// The exact reason depends on the host running the tests: a plain node process
+// on macOS/Windows is `not-a-dsh-carrier`, on Linux it is `unsupported-platform`.
+// Both mean the same thing here — this process cannot restart itself.
+assert.ok(
+  ['not-a-dsh-carrier', 'unsupported-platform'].includes(body.value.reason),
+  `unexpected reason: ${body.value.reason}`,
+)
 assert.ok(Array.isArray(body.value.inheritedNodeMode))
 assert.equal(typeof body.value.delayMs, 'number')
 assert.equal(typeof body.value.logDirectory, 'string')

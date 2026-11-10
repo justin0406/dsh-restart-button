@@ -126,36 +126,56 @@ try {
     console.log('skip: /var symlink case only applies to macOS')
   }
 
-  // ---- 2. real CLI restart: host tree is replaced by a live process ---------
-  const host = startFakeHost()
-  fakeHosts.push(host)
-  await sleep(300)
-  const target = writeTarget(baseTarget(host.pid))
-  const result = await runHelper(target)
-  const log = readLog()
-  assert.equal(result.code, 0, `helper must exit 0 (stderr: ${result.stderr})\n${log}`)
-  assert.match(log, /helper start pid=\d+ mode=cli/u)
-  assert.match(log, /relaunched DSH as pid \d+/u, `helper must report the replacement pid:\n${log}`)
-  assert.equal(pidAlive(host.pid), false, 'the old host process must be gone')
+  // ---- 2. real CLI restart ---------------------------------------------------
+  // The replacement can only be observed where the helper actually restarts
+  // (darwin/win32), and the process search below needs `ps`, so the full check
+  // runs on macOS. On any other platform the helper must refuse instead:
+  // exit 1, a clear log line, and nothing killed — the safety property CI
+  // (Linux) locks in.
+  if (process.platform === 'darwin') {
+    const host = startFakeHost()
+    fakeHosts.push(host)
+    await sleep(300)
+    const target = writeTarget(baseTarget(host.pid))
+    const result = await runHelper(target)
+    const log = readLog()
+    assert.equal(result.code, 0, `helper must exit 0 (stderr: ${result.stderr})\n${log}`)
+    assert.match(log, /helper start pid=\d+ mode=cli/u)
+    assert.match(log, /relaunched DSH as pid \d+/u, `helper must report the replacement pid:\n${log}`)
+    assert.equal(pidAlive(host.pid), false, 'the old host process must be gone')
 
-  // The replacement is a detached node running the fake CLI; find it, prove it
-  // is alive, then stop it so the test leaves nothing behind.
-  const ps = spawn('ps', ['-A', '-o', 'pid=', '-o', 'args='])
-  let psOut = ''
-  ps.stdout.on('data', (chunk) => {
-    psOut += chunk
-  })
-  await new Promise((resolve) => ps.on('close', resolve))
-  const replacement = psOut
-    .split('\n')
-    .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line))
-    .filter(Boolean)
-    .find((match) => match[2].includes(fakeCli) && Number(match[1]) !== process.pid)
-  assert.ok(replacement, 'the helper must have started a replacement process')
-  const replacementPid = Number(replacement[1])
-  fakeHosts.push({ pid: replacementPid })
-  assert.equal(pidAlive(replacementPid), true, 'the replacement must still be alive')
-  console.log('ok: CLI restart replaced the host with pid', replacementPid)
+    // The replacement is a detached node running the fake CLI; find it, prove it
+    // is alive, then stop it so the test leaves nothing behind.
+    const ps = spawn('ps', ['-A', '-o', 'pid=', '-o', 'args='])
+    let psOut = ''
+    ps.stdout.on('data', (chunk) => {
+      psOut += chunk
+    })
+    await new Promise((resolve) => ps.on('close', resolve))
+    const replacement = psOut
+      .split('\n')
+      .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line))
+      .filter(Boolean)
+      .find((match) => match[2].includes(fakeCli) && Number(match[1]) !== process.pid)
+    assert.ok(replacement, 'the helper must have started a replacement process')
+    const replacementPid = Number(replacement[1])
+    fakeHosts.push({ pid: replacementPid })
+    assert.equal(pidAlive(replacementPid), true, 'the replacement must still be alive')
+    console.log('ok: CLI restart replaced the host with pid', replacementPid)
+  } else if (process.platform === 'win32') {
+    console.log('skip: the replacement search needs ps; the Windows path is verified on hardware')
+  } else {
+    const host = startFakeHost()
+    fakeHosts.push(host)
+    await sleep(300)
+    const target = writeTarget(baseTarget(host.pid))
+    const result = await runHelper(target)
+    assert.equal(result.code, 1, 'the helper must refuse on an unsupported platform')
+    assert.match(readLog(), /unsupported platform .*refusing to restart/u, 'the refusal must be logged')
+    assert.equal(pidAlive(host.pid), true, 'the refusal must leave the host alone')
+    assert.equal(existsSync(target), false, 'the target file is removed even on refusal')
+    console.log('ok: helper refuses to restart on an unsupported platform and kills nothing')
+  }
 
   // ---- 3. missing target file: fail loudly, exit non-zero -------------------
   const missing = await runHelper(join(directory, 'does-not-exist.json'))

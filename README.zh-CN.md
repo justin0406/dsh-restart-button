@@ -123,7 +123,8 @@ npm test        # 四套测试，无需安装依赖
 - `test/helper.test.mjs`：真实运行 `restart.mjs` 替换一个假 CLI 进程树，验证只杀该杀的、拉起后确认存活。
 
 CI 在 macOS 与 Linux、Node 20/22 上跑全部四套（`.github/workflows/test.yml`）。`/var` 与
-`/private/var` 的用例仅限 macOS，其他平台跳过。
+`/private/var` 的用例仅限 macOS，其他平台跳过。Linux 上助手套件断言的是「拒绝执行」
+（`unsupported platform`、不杀任何进程）而非进程替换——助手只在 macOS/Windows 上执行重启。
 
 ## 安装 / 卸载
 

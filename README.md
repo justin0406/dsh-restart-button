@@ -138,7 +138,9 @@ Four suites:
   it kills only what it should and confirms the replacement.
 
 CI runs all four on macOS and Linux with Node 20 and 22 (`.github/workflows/test.yml`). The
-`/var` vs `/private/var` case is macOS-only and skips elsewhere.
+`/var` vs `/private/var` case is macOS-only and skips elsewhere. On Linux the helper suite asserts
+the refusal (`unsupported platform`, nothing killed) instead of the replacement, because the helper
+only restarts on macOS/Windows.
 
 ## Install
 
