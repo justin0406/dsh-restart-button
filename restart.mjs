@@ -490,11 +490,23 @@ async function requestQuit(target, log) {
       `main process ignored the close request after ${Math.round(QUIT_GRACE_MS / 1000)}s ` +
         '(DSH hides to the tray instead of quitting); forcing it down',
     )
-    if (Number.isInteger(target.hostPid) && target.hostPid > 0) await stopTree(target.hostPid, log)
+    // Take the desktop shell down before its host.  The shell supervises the
+    // host child and turns every host exit it did not initiate into its fatal
+    // recovery dialog ("应用无法启动或已意外停止"), so killing the host first
+    // makes that dialog flash up on every plugin restart.  Once the shell is
+    // gone there is no supervisor left to report the host exit.
     const table = await processTable()
-    // An unreadable table cannot tell us which pids to stop; the forced teardown
-    // below still reports whether anything survived.
-    for (const pid of table === null ? [] : findMainProcesses(target, table)) await stopTree(pid, log)
+    const shells = table === null ? [] : findMainProcesses(target, table)
+    if (table === null && Number.isInteger(target.mainPid) && pidAlive(target.mainPid)) {
+      // An unreadable table cannot tell us which pids to stop; fall back to the
+      // shell pid recorded when the plugin loaded.
+      shells.push(target.mainPid)
+    }
+    for (const pid of shells) {
+      log(`stopping desktop shell process ${pid} before its host`)
+      await runCapture('taskkill', ['/PID', String(pid), '/F'])
+    }
+    if (Number.isInteger(target.hostPid) && target.hostPid > 0) await stopTree(target.hostPid, log)
     await waitFor(async () => (await mainProcessCount(target)) === 0, 8_000, 250)
     return
   }

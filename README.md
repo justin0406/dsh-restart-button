@@ -174,6 +174,17 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Changelog
 
+### 2.3.1
+
+- Windows desktop restarts no longer flash the shell's fatal recovery dialog
+  ("应用无法启动或已意外停止"). The helper used to take the host down first, but the Electron shell
+  supervises that host and turns *any* host exit it did not initiate into its recovery dialog, so the
+  dialog appeared for the split second before the shell itself was killed. The shell is now stopped
+  before its host, so there is nothing left to report the exit.
+- `test/restart.test.mjs` runs on Windows too: the macOS fixtures pin their platform, the probe child is
+  spawned through `fileURLToPath`/`import.meta.url` URLs instead of hand-built `file://` paths, and a new
+  assertion locks in the shell-before-host teardown order.
+
 ### 2.3.0
 
 - An unreadable process table is now treated as **unknown**, not as "the app is gone". Captures that

@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const restart = await import(new URL('../restart.mjs', import.meta.url).href)
 
@@ -168,10 +169,12 @@ const macTable = new Map([
   [5000, { ppid: 1, args: '/usr/bin/some-other-tool' }],
 ])
 
-const macMains = restart.findMainProcesses(macTarget, macTable)
+// The fixtures below are macOS shaped, so pin the platform: without it the
+// matcher falls back to the platform the suite happens to run on.
+const macMains = restart.findMainProcesses(macTarget, macTable, 'darwin')
 assert.deepEqual(macMains, [4000, 4001], 'only bare/psn launches count as the app main process')
 
-const macApp = restart.findAppProcesses(macTarget, macTable)
+const macApp = restart.findAppProcesses(macTarget, macTable, 'darwin')
 assert.deepEqual(macApp, [4000, 4001, 4242, 4300], 'every process under the bundle belongs to the app')
 console.log('ok: macOS main/app process matching')
 
@@ -241,6 +244,18 @@ assert.ok(polite > 0, 'polite close is logged')
 assert.ok(forced > polite, 'forced teardown follows the polite close')
 console.log('ok: Windows quit path escalates from polite close to forced teardown')
 
+// 2.3.1: the shell shows its fatal recovery dialog whenever its host exits
+// while the shell is still running, so stopping the host first made that
+// dialog flash up on every plugin restart. The forced teardown has to stop the
+// shell before the host.
+const shellStop = helperSource.indexOf('stopping desktop shell process')
+const hostStop = helperSource.indexOf(
+  'await stopTree(target.hostPid, log)\n    await waitFor(async () => (await mainProcessCount(target)) === 0, 8_000, 250)',
+)
+assert.ok(shellStop > 0, 'forced teardown stops the desktop shell')
+assert.ok(hostStop > shellStop, 'forced teardown stops the shell before the host')
+console.log('ok: forced teardown takes the desktop shell down before its host')
+
 // The window-restore loop must give up on exit code 4 (no WindowPattern) and
 // keep polling on 3 (window not there yet). The old table waited on 4 and
 // bailed on 3, which meant a successful restart spun for 90 s.
@@ -268,15 +283,18 @@ try {
 }
 
 // The numeric knobs must honour their environment overrides; checks run in a
-// child process because the constants are bound at import time.
+// child process because the constants are bound at import time. The module is
+// addressed by its file URL and the cwd by a filesystem path, so the probe works
+// on Windows as well as on POSIX hosts.
+const probeModule = new URL('../restart.mjs', import.meta.url).href
 const probe = spawnSync(
   process.execPath,
   [
     '-e',
-    "import(new URL('./restart.mjs', 'file://' + process.cwd() + '/')).then((m) => console.log(m.QUIT_GRACE_MS + ':' + m.CONFIRM_MS))",
+    `import(${JSON.stringify(probeModule)}).then((m) => console.log(m.QUIT_GRACE_MS + ':' + m.CONFIRM_MS))`,
   ],
   {
-    cwd: new URL('..', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, DSH_RESTART_QUIT_GRACE_MS: '1234', DSH_RESTART_CONFIRM_MS: '2500' },
     encoding: 'utf8',
   },

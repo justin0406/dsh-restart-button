@@ -153,6 +153,14 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 
 ## 变更记录
 
+### 2.3.1
+
+- Windows 桌面版重启不再先闪一下「应用无法启动或已意外停止」的崩溃弹窗。原先助手先拆 host，而
+  Electron 主进程（shell）把**任何**非自己发起的 host 退出都当成崩溃上报，于是在 shell 自己被杀前的
+  一瞬间弹出了该对话框。现在改为**先杀 shell、再杀 host**，宿主退出时已没有监工。
+- `test/restart.test.mjs` 在 Windows 上也能跑了：macOS 夹具显式指定平台，探针子进程改用
+  `fileURLToPath`/`import.meta.url` 拼 URL（不再手工拼 `file://`），并新增「shell 先于 host 停止」的断言。
+
 ### 2.3.0
 
 - 读不到的进程表现在按**未知**处理，不再当成「App 已经退出」。超过 8 MB 的输出原先会被截尾成无法
