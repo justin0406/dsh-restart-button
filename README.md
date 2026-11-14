@@ -26,7 +26,7 @@ dependencies.
 
 | Shape | macOS | Windows |
 |---|---|---|
-| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ verified on hardware (2.2.1, 2026-11-05); the 2.3.1 teardown-order change is covered by tests but not yet re-checked on hardware |
+| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ verified on hardware (2.2.1, 2026-11-05; re-verified in 2.3.1: no recovery dialog flashes) |
 | `dsh web` (CLI carrier) | ✅ verified on hardware (2.1.0, 2026-11-04: process-tree replacement + automatic page reload) | ✅ same implementation (process table via CIM/PowerShell) |
 
 Where the plugin cannot restart DSH (the entry point is neither `dsh-desktop-host` nor
@@ -341,14 +341,11 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Known limitations
 
-- **Windows 2.3.1 teardown order is not re-verified on hardware.** The shell-before-host change is
-  covered by a source-level assertion, but the visible symptom it fixes (the recovery dialog flashing)
-  can only be confirmed by restarting the desktop app on Windows once.
 - **Windows quit path**: quitting keeps a polite `taskkill /PID` first (so DSH could still show its
   own confirmation), but because closing the window only hides DSH to the tray, the helper forces the
   process trees down after `QUIT_GRACE_MS` (8 s, `DSH_RESTART_QUIT_GRACE_MS`). The relaunch requires
-  the new main process to stay alive for 3 s. The quit path itself was verified on Windows hardware
-  in 2.2.1.
+  the new main process to stay alive for 3 s. Verified on Windows hardware (2.2.1, and re-verified in
+  2.3.1 for the shell-before-host order).
 - **The relaunch environment is deliberately minimal**, so a DSH that depends on inherited
   `http_proxy`/`NODE_*`/shell variables will come back without them. This is what prevents the
   Node-mode relaunch failure described below; it is not configurable on purpose.
