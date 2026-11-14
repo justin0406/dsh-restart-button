@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/justin0406/dsh-restart-button/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button/actions/workflows/test.yml"><img alt="CI" src="https://github.com/justin0406/dsh-restart-button/actions/workflows/test.yml/badge.svg?branch=main" /></a>
   <a href="https://github.com/justin0406/dsh-restart-button"><img alt="GitHub stars" src="https://img.shields.io/github/stars/justin0406/dsh-restart-button" /></a>
   <a href="https://github.com/justin0406/dsh-restart-button/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
 </p>
@@ -17,11 +18,13 @@
 macOS 与 Windows 的两种形态都支持。Linux 不做支持（无法实机验证），在 Linux 上按钮会提示
 `unsupported-platform`，不会误操作。
 
+需要 **Node.js 20 及以上**（见 `package.json` 的 `engines`）；插件本身没有运行时依赖。
+
 ## 支持矩阵
 
 | 运行形态 | macOS | Windows |
 |---|---|---|
-| 桌面应用（Electron） | ✅ 实机验证（2.1.0，2026-11-04：退出→干净拉起→自动恢复，8.2s） | ✅ Windows 实机确认可用（2.2.1，2026-11-05） |
+| 桌面应用（Electron） | ✅ 实机验证（2.1.0，2026-11-04：退出→干净拉起→自动恢复，8.2s） | ✅ 实机验证（2.2.1，2026-11-05）；2.3.1 的拆除顺序改动有测试锁定，但尚未重新实机确认 |
 | `dsh web`（CLI 载体） | ✅ 实机验证（2.1.0，2026-11-04：进程树替换 + 页面自动重连） | ✅ 同一实现（进程表用 CIM/PowerShell） |
 
 入口既不是 `dsh-desktop-host` 也不是 `@deepseek-ai/dsh` 时无法重启：bridge 返回
@@ -32,14 +35,19 @@ macOS 与 Windows 的两种形态都支持。Linux 不做支持（无法实机�
 1. 点侧边栏按钮 → 弹窗询问是否重启，并按当前运行形态说明影响（桌面版会整个退出）。
 2. 确认后 Host 立刻返回 202（必须先答复，否则进程被杀后前端拿不到响应），后台助手接棒。
 3. 助手按形态执行：
-   - **desktop**：请求应用退出（macOS 用标准 quit AppleEvent、Windows 用 `taskkill /PID` 发关闭消息）
-     → 等主进程消失（最多 90 秒；若在退出确认框里取消，写 `leaving the app alone` 并放弃）
-     → 等整个 App 包/安装目录的进程都消失（macOS 还额外等 LaunchServices 注销，`lsappinfo`）
-     → 静置 3 秒 → 用**干净环境**拉起 → 新主进程持续存活 3 秒才算成功，失败退避重试
-     （`open -a` 4 次 → bundle id 兜底 2 次）。
-   - **cli**：停掉当前 Host 的进程树 → 等退出 → 用原来的 argv 重新 spawn → 确认新进程持续存活。
-4. web 模式下前端轮询 `/api/dsh-restart/status`，发现 `hostPid` 变了就 `location.reload()`；
-   120 秒仍未回来则提示手动刷新。
+   - **desktop（macOS）**：用标准 quit AppleEvent 请求应用退出 → 等主进程消失（最多 90 秒；若在退出
+     确认框里取消，写 `leaving the app alone` 并放弃）→ 等 App 包内所有进程消失，并等 LaunchServices
+     注销该 bundle（`lsappinfo`）→ 静置 3 秒 → 用**干净环境**拉起 → 新主进程持续存活 3 秒才算成功；
+     失败按退避重试（`open -a` 4 次，再按 bundle id 兜底 2 次）。
+   - **desktop（Windows）**：先向 shell 发礼貌关闭（`taskkill /PID`，不带 `/F`，只发 `WM_CLOSE`）→
+     `QUIT_GRACE_MS`（8 秒）后仍在（DSH 关窗只是隐藏到托盘）则强制拆除，**先杀 shell、再杀 host**，
+     这样 shell 的监工不会看到一次「无人认领」的 host 退出，也就不会闪崩溃弹窗 → 用干净环境直接拉起
+     可执行文件 → 要求新主进程持续存活。
+   - **cli**：停掉当前 Host 的进程树 → 等退出 → 用原来的 argv 与工作目录重新 spawn → 确认新进程持续存活。
+4. web 模式下前端每 1.2 秒轮询 `/api/dsh-restart/status`，发现 `hostPid` 变了就 `location.reload()`；
+   25 秒后提示可能正停在退出确认框，120 秒仍未回来则提示手动刷新。
+
+完整的超时与重试参数见[环境开关](#环境开关)。
 
 ## 为什么必须用干净环境拉起
 
@@ -55,15 +63,80 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
   `NODE_OPTIONS`、`NODE_REPL_EXTERNAL_MODULE`；
 - 拉起后必须看到新主进程继续存活才写 `relaunched`。
 
+Windows 上是同一个陷阱的另一种形态：直接 spawn 可执行文件会继承助手的环境，而助手本身正是被它要替换的
+host 以 `ELECTRON_RUN_AS_NODE=1` 启动的。spawn 前删掉这些变量，新实例才会是「应用」而不是裸 Node 进程。
+
+## 为什么 Windows 要先杀 shell 再杀 host
+
+Electron 主进程（shell）监工 host 子进程，把**任何**非自己发起的 host 退出都当成崩溃，弹出
+「应用无法启动或已意外停止」的恢复对话框。所以先杀 host 必然会在 shell 自己被杀前的一瞬间闪出该弹窗。
+强制拆除现在改为先杀 shell，等 host 倒下时已经没有监工可以上报。进程表读不到时，用插件加载时记录的
+`mainPid` 作为兜底的 shell pid。
+
 ## 接口
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory,token}}` |
-| POST | `/api/dsh-restart/restart` | 202 已接受；重复请求 202 `alreadyRequested`；不可重启 409 `restart/unsupported`；干跑 200 `plan`；token 不符 403 `bridge/bad-token`；失败 500 `restart/spawn-failed` / `restart/helper-exited` |
+两个端点都在 `/api/dsh-restart` 下，统一返回 `{ok:true,value}` 或 `{ok:false,error:{code,message}}`。
 
-安全约束：只接受回环地址；`Host` 头必须是回环名；拒绝 `sec-fetch-site: cross-site`；`Origin` 只允许
-缺省、`null`、`dsh-app://app` 或 `webServer.getOrigin()`；写操作只接受 POST；请求体上限 16 KiB。
+### `GET|POST /api/dsh-restart/status`
+
+```jsonc
+{
+  "ok": true,
+  "value": {
+    "supported": true,          // 本进程能否自行重启
+    "mode": "desktop",          // "desktop" | "cli" | null
+    "platform": "darwin",       // process.platform
+    "reason": null,             // 不可重启的原因："unsupported-platform" / "not-a-dsh-carrier"
+                                // / "disabled-by-mode" / "app-bundle-not-found"
+    "appPath": "/Applications/DeepSeek Harness.app",
+    "appId": "com.deepseek.dsh",// macOS 取自 Info.plist，Windows 为 null
+    "mainBinary": "...",        // Electron 主可执行文件
+    "mainPid": 4000,            // Electron 主进程，cli 模式为 null
+    "hostPid": 4242,            // 本插件所在的进程
+    "launchEnvironment": "minimal (LaunchServices, clean env)",
+    "inheritedNodeMode": [],    // 本进程里仍存在的 ELECTRON_RUN_AS_NODE 等变量
+    "delayMs": 900,             // 助手动作前的延迟（200–10000）
+    "dryRun": false,
+    "restarting": false,        // 已有助手在跑
+    "lastRequest": null,        // 上次重启的 {at, mode, helperPid, logPath}
+    "logDirectory": "/var/folders/.../dsh-restart",
+    "token": "…",               // POST /restart 必须回传
+    "diagnostics": { "platform": "darwin", "entry": "…", "pid": 4242, "ppid": 4000 }
+  }
+}
+```
+
+`GET` 与 `POST` 行为完全一致，都不会产生副作用。
+
+### `POST /api/dsh-restart/restart`
+
+请求体可选，可覆盖两项：
+
+```jsonc
+{ "token": "…", "dryRun": true, "delayMs": 1500 }
+```
+
+`token` 必填（见下文）。`dryRun` 只对本次调用生效；`delayMs` 会被钳制在 200–10000 ms。
+
+| 状态码 | code | 含义 |
+|---|---|---|
+| 202 | — | `{accepted:true, mode, helperPid, logPath}`，重启已交给助手 |
+| 202 | — | `{alreadyRequested:true}`，已有重启在跑，本次没有新动作 |
+| 200 | — | 干跑：`{accepted:false, dryRun:true, plan:{…}}`，没有杀进程也没有拉起 |
+| 400 | `bridge/invalid-body` | 请求体不是 JSON 对象 |
+| 403 | `bridge/forbidden` | 对端、`Host`、`Sec-Fetch-Site` 或 `Origin` 不受信 |
+| 403 | `bridge/bad-token` | 缺少或回传了错误的 `token` |
+| 405 | `bridge/method-not-allowed` | 重启端点用了 POST 以外的方法 |
+| 409 | `restart/unsupported` | 本进程无法自行重启，`diagnostics` 给出原因 |
+| 413 | `bridge/body-too-large` | 请求体超过 16 KiB |
+| 500 | `restart/spawn-failed` | 助手进程无法启动 |
+| 500 | `restart/helper-exited` | 助手在写出第一行日志前就退出了 |
+| 500 | `bridge/failed` | 路由处理器抛出异常，具体原因见插件日志 |
+
+### 安全约束
+
+只接受回环地址；`Host` 头必须是回环名；拒绝 `sec-fetch-site: cross-site`；`Origin` 只允许缺省、
+`null`、`dsh-app://app` 或 `webServer.getOrigin()`；写操作只接受 POST；请求体上限 16 KiB。
 此外 `POST /restart` 必须回传 `GET /status` 下发的 `token`——这补上了最后一种情况：既不发送
 `Origin` 也不发送 `Sec-Fetch-Site` 的浏览器（Safari 16.4 之前）里，跨站表单 POST 会被当成同源请求。
 局域网/手机浏览器访问会被 403 拒绝。
@@ -78,16 +151,21 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
 | 关键字 | 含义 |
 |---|---|
 | `helper start` | 助手启动，包含 mode / hostPid / mainPid / app 路径 |
+| `asking … to quit` / `close politely` | 已发出退出请求（AppleEvent / 不带 `/F` 的 `taskkill`） |
 | `leaving the app alone` | 主进程一直没退出（通常是退出确认框被取消），插件没有动它 |
+| `stopping desktop shell process N before its host` | Windows 强制拆除：先杀 shell，避免闪崩溃弹窗 |
 | `app torn down` | 整个 App/安装目录的进程都退干净了 |
+| `pausing Ns before the first launch` | 拆除与拉起之间的静置期 |
 | `launch attempt i/N` | 第 i 次拉起 |
 | `bundle-id launch attempt i/2` | macOS 兜底：按 bundle id 拉起 |
 | `instance came up and exited again` | 新实例起来又退出（环境或单实例锁问题），会继续重试 |
 | `relaunched ... (attempt i)` | 成功，且新主进程已持续存活 |
 | `relaunched DSH as pid N` | CLI 模式：替换进程已启动 |
+| `restored and focused the window of pid N` | Windows：已把最小化的窗口还原并置前 |
 | `working directory ... is gone` | 记录的工作目录已消失，CLI 改从 `HOME` 拉起 |
 | `process table unavailable` | `ps`/PowerShell 读不到进程表；助手只停根进程，不假设其余进程已消失 |
 | `relaunch FAILED` | 全部尝试失败，需手动打开 |
+| `unsupported platform … refusing to restart` | Linux 上助手拒绝执行任何操作 |
 
 插件启动时会清理超过一周的日志与残留 `target-*.json`。
 
@@ -99,14 +177,26 @@ macOS 的 `open` 会把调用者的环境原样传给新启动的 App —— 于
 
 ## 环境开关
 
-| 变量 | 作用 |
-|---|---|
-| `DSH_RESTART_MODE` | `desktop` / `cli` / `off`。强制指定载体形态，或彻底停用 bridge（`status` 报 `disabled-by-mode`，`restart` 返回 409）。 |
-| `DSH_RESTART_DRY_RUN` | `1` = 干跑。 |
-| `DSH_RESTART_QUIT_WAIT_MS` / `_QUIT_GRACE_MS` / `_SETTLE_MS` / `_PAUSE_MS` / `_CONFIRM_MS` / `_LAUNCH_WAIT_MS` / `_LAUNCH_TRIES` / `_PROCESS_WAIT_MS` | 各阶段超时与重试次数，助手启动时读取。 |
-| `DSH_RESTART_OPEN_BIN` | 覆盖 `/usr/bin/open`（仅 macOS，测试用）。 |
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `DSH_RESTART_MODE` | *（未设置）* | `desktop` / `cli` / `off`。强制指定载体形态，或彻底停用 bridge（`status` 报 `disabled-by-mode`，`restart` 返回 409）。 |
+| `DSH_RESTART_DRY_RUN` | *（未设置）* | `1` = 干跑。 |
+| `DSH_RESTART_QUIT_WAIT_MS` | 90000 | desktop（macOS）：主进程退出前最多等多久，超时即放弃。 |
+| `DSH_RESTART_QUIT_GRACE_MS` | 8000 | desktop（Windows）：礼貌关闭后等多久再强制拆除进程树。 |
+| `DSH_RESTART_SETTLE_MS` | 6000 | 主进程退出后，旧应用要多久彻底消失。 |
+| `DSH_RESTART_PAUSE_MS` | 3000 | 拆除与首次拉起之间的静置期。 |
+| `DSH_RESTART_CONFIRM_MS` | 3000 | 新实例需持续存活多久才算成功。 |
+| `DSH_RESTART_LAUNCH_WAIT_MS` | 15000 | 拉起后等新实例出现的最长时间。 |
+| `DSH_RESTART_LAUNCH_TRIES` | 4 | 拉起尝试次数（之后 macOS 还有 2 次 bundle id 兜底）。 |
+| `DSH_RESTART_PROCESS_WAIT_MS` | 20000 | 进程收到信号后允许多久退出（cli 模式）。 |
+| `DSH_RESTART_OPEN_BIN` | `/usr/bin/open` | 覆盖启动器（仅 macOS，测试用）。 |
 
-所有 `DSH_RESTART_*` 变量都会穿过干净环境传给助手，桌面模式下同样生效。
+所有 `DSH_RESTART_*` 变量都会穿过干净环境传给助手，桌面模式下同样生效。取值必须是非负数字，
+否则回退到默认值。
+
+注意干净环境只保留 `HOME/USER/LOGNAME/SHELL/TMPDIR/LANG/PATH`，因此被拉起的应用**不会**继承
+`http_proxy`、自定义 `NODE_*` 或 shell 注入的变量——这是刻意为之（见下文），但也意味着依赖这些变量的
+启动方式必须改由 DSH 自身配置提供。
 
 ## 测试
 
@@ -207,9 +297,13 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 
 ## 已知限制
 
+- **Windows 的 2.3.1 拆除顺序尚未重新实机验证**：先杀 shell 的改动有源码级断言锁定，但它修的可观察症状
+  （崩溃弹窗一闪）只能在 Windows 上实际重启一次桌面版才能确认。
 - **Windows 退出路径**：先尝试 `taskkill /PID` 礼貌关闭（保留 DSH 自己弹确认的可能），但关窗口只会
   隐藏到托盘，因此 `QUIT_GRACE_MS`（8 秒，可用 `DSH_RESTART_QUIT_GRACE_MS` 调整）后助手会强制关闭
-  整棵进程树；拉起后要求新主进程持续存活 3 秒才算成功。该路径已在 Windows 实机验证（2.2.1，2026-11-05）。
+  整棵进程树；拉起后要求新主进程持续存活 3 秒才算成功。退出路径本身已在 2.2.1 实机验证。
+- **拉起环境是刻意极简的**：依赖继承来的 `http_proxy`/`NODE_*`/shell 变量的 DSH，重启后会失去这些变量。
+  这正是避免下文「Node 模式启动失败」的手段，因此不提供配置项。
 - `--port 0` 启动的 `dsh web` 重启后会换端口，前端轮询用的是相对路径，只能提示手动访问新地址；
   默认固定端口时无此问题。
 - 桌面版重启必然中断当前会话/turn（进程整体退出）。

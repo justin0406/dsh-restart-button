@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/justin0406/dsh-restart-button/releases/latest"><img alt="GitHub release" src="https://img.shields.io/github/v/release/justin0406/dsh-restart-button" /></a>
+  <a href="https://github.com/justin0406/dsh-restart-button/actions/workflows/test.yml"><img alt="CI" src="https://github.com/justin0406/dsh-restart-button/actions/workflows/test.yml/badge.svg?branch=main" /></a>
   <a href="https://github.com/justin0406/dsh-restart-button"><img alt="GitHub stars" src="https://img.shields.io/github/stars/justin0406/dsh-restart-button" /></a>
   <a href="https://github.com/justin0406/dsh-restart-button/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
 </p>
@@ -18,11 +19,14 @@ then restarts DSH properly:
 Both shapes are supported on **macOS** and **Windows**. Linux is not supported (it could not be
 verified on real hardware); on Linux the button reports `unsupported-platform` and never misbehaves.
 
+Requires **Node.js 20 or newer** (`engines` in `package.json`); the plugin itself has no runtime
+dependencies.
+
 ## Support matrix
 
 | Shape | macOS | Windows |
 |---|---|---|
-| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ verified on hardware (2.2.1, 2026-11-05) |
+| Desktop app (Electron) | ✅ verified on hardware (2.1.0, 2026-11-04: quit → clean relaunch → recovery, 8.2s) | ✅ verified on hardware (2.2.1, 2026-11-05); the 2.3.1 teardown-order change is covered by tests but not yet re-checked on hardware |
 | `dsh web` (CLI carrier) | ✅ verified on hardware (2.1.0, 2026-11-04: process-tree replacement + automatic page reload) | ✅ same implementation (process table via CIM/PowerShell) |
 
 Where the plugin cannot restart DSH (the entry point is neither `dsh-desktop-host` nor
@@ -36,17 +40,24 @@ why, and nothing is killed.
 2. On confirmation the host answers `202` immediately — it has to, because the process is about to
    die and the page needs the response — and a detached helper takes over.
 3. The helper branches by shape:
-   - **desktop**: ask the app to quit (standard quit AppleEvent on macOS, `taskkill /PID` on Windows)
-     → wait for the main process to disappear (up to 90 s; if the quit confirmation was cancelled it
-     logs `leaving the app alone` and gives up) → wait for every process under the app bundle /
-     install directory to disappear (macOS additionally waits for LaunchServices to drop the
-     registration, via `lsappinfo`) → pause 3 s → launch with a **clean environment** → the new main
-     process has to stay alive for 3 s to count as success; failures are retried with backoff
-     (`open -a` 4 times, then the bundle id twice).
+   - **desktop (macOS)**: ask the app to quit through the standard quit AppleEvent → wait for the main
+     process to disappear (up to 90 s; if the quit confirmation was cancelled it logs
+     `leaving the app alone` and gives up) → wait for every process under the app bundle to disappear
+     and for LaunchServices to drop the registration (`lsappinfo`) → pause 3 s → launch with a
+     **clean environment** → the new main process has to stay alive for 3 s to count as success;
+     failures are retried with backoff (`open -a` 4 times, then the bundle id twice).
+   - **desktop (Windows)**: post a polite close to the shell (`taskkill /PID`, no `/F`), which only
+     sends `WM_CLOSE` → if the app is still there after `QUIT_GRACE_MS` (8 s) — DSH hides to the tray
+     instead of quitting — force the **shell down first, then its host**, so the shell's supervisor
+     never sees an unattended host exit and no recovery dialog flashes → launch the executable
+     directly with a clean environment → require the new main process to stay alive.
    - **cli**: stop the current host's process tree → wait for exit → spawn again with the original
-     argv → confirm the replacement stays alive.
-4. In web mode the page polls `/api/dsh-restart/status` and calls `location.reload()` as soon as
-   `hostPid` changes; after 120 s it asks for a manual refresh.
+     argv and working directory → confirm the replacement stays alive.
+4. In web mode the page polls `/api/dsh-restart/status` every 1.2 s and calls `location.reload()` as
+   soon as `hostPid` changes; after 25 s it hints that the app may be showing a quit confirmation, and
+   after 120 s it asks for a manual refresh.
+
+The full timing table is under [Environment switches](#environment-switches).
 
 ## Why the relaunch needs a clean environment
 
@@ -66,19 +77,89 @@ treated as "the restart worked". Therefore the plugin:
   `NODE_OPTIONS` and `NODE_REPL_EXTERNAL_MODULE`;
 - only writes `relaunched` once the new main process has stayed alive.
 
+On Windows the same trap exists in a different form: spawning the executable inherits the helper's
+environment, and the helper itself was started with `ELECTRON_RUN_AS_NODE=1` by the host it is
+replacing. Stripping those variables before the spawn is what keeps the new instance an app rather
+than a bare Node process.
+
+## Why the shell is stopped before its host (Windows)
+
+The Electron shell supervises its host child and turns *any* host exit it did not initiate into its
+fatal recovery dialog ("应用无法启动或已意外停止"). Killing the host first therefore flashed that
+dialog for the split second before the shell itself was killed. The forced teardown now stops the
+shell first, so by the time the host goes down there is no supervisor left to report it. When the
+process table cannot be read, the `mainPid` recorded at plugin load is used as the fallback shell pid.
+
 ## API
 
-| Method | Path | Notes |
-|---|---|---|
-| GET / POST | `/api/dsh-restart/status` | `{ok:true,value:{supported,mode,platform,reason,appPath,mainPid,hostPid,launchEnvironment,inheritedNodeMode,delayMs,dryRun,restarting,lastRequest,logDirectory,token}}` |
-| POST | `/api/dsh-restart/restart` | 202 accepted; 202 `alreadyRequested` for duplicates; 409 `restart/unsupported`; 200 `plan` in dry run; 403 `bridge/bad-token`; 500 `restart/spawn-failed` / `restart/helper-exited` |
+Both endpoints live under `/api/dsh-restart` and answer `{ok:true,value}` or
+`{ok:false,error:{code,message}}`.
 
-Security: loopback peers only; the `Host` header must be a loopback name; `sec-fetch-site: cross-site`
-is rejected; `Origin` must be absent, `null`, `dsh-app://app`, or `webServer.getOrigin()`; mutating
-calls must be POST; bodies are capped at 16 KiB. On top of that, `POST /restart` must echo the
-`token` that `GET /status` just handed out — that closes the remaining hole for browsers that send
-neither `Origin` nor `Sec-Fetch-Site` (Safari before 16.4), where a cross-site form post would
-otherwise look like a same-origin request. Requests from the LAN or a phone browser get 403.
+### `GET|POST /api/dsh-restart/status`
+
+```jsonc
+{
+  "ok": true,
+  "value": {
+    "supported": true,          // false when this process cannot restart itself
+    "mode": "desktop",          // "desktop" | "cli" | null
+    "platform": "darwin",       // process.platform
+    "reason": null,             // why it is unsupported: "unsupported-platform",
+                                // "not-a-dsh-carrier", "disabled-by-mode", "app-bundle-not-found"
+    "appPath": "/Applications/DeepSeek Harness.app",
+    "appId": "com.deepseek.dsh",// from Info.plist on macOS, null on Windows
+    "mainBinary": "...",        // Electron main executable
+    "mainPid": 4000,            // Electron main process, null in cli mode
+    "hostPid": 4242,            // the process this plugin runs in
+    "launchEnvironment": "minimal (LaunchServices, clean env)",
+    "inheritedNodeMode": [],    // ELECTRON_RUN_AS_NODE & friends still set here
+    "delayMs": 900,             // delay before the helper acts (200–10000)
+    "dryRun": false,
+    "restarting": false,        // a helper is already running
+    "lastRequest": null,        // {at, mode, helperPid, logPath} of the last restart
+    "logDirectory": "/var/folders/.../dsh-restart",
+    "token": "…",               // required by POST /restart
+    "diagnostics": { "platform": "darwin", "entry": "…", "pid": 4242, "ppid": 4000 }
+  }
+}
+```
+
+`GET` and `POST` behave identically and neither mutates anything.
+
+### `POST /api/dsh-restart/restart`
+
+The body is optional and may override two things:
+
+```jsonc
+{ "token": "…", "dryRun": true, "delayMs": 1500 }
+```
+
+`token` is mandatory (see below). `dryRun` forces a dry run for this call only; `delayMs` is clamped
+to 200–10000 ms.
+
+| Status | Code | Meaning |
+|---|---|---|
+| 202 | — | `{accepted:true, mode, helperPid, logPath}` — the helper owns the restart now |
+| 202 | — | `{alreadyRequested:true}` — a restart is already in flight; nothing new started |
+| 200 | — | dry run: `{accepted:false, dryRun:true, plan:{…}}`; nothing was killed or launched |
+| 400 | `bridge/invalid-body` | body is not a JSON object |
+| 403 | `bridge/forbidden` | peer, `Host`, `Sec-Fetch-Site` or `Origin` is not trusted |
+| 403 | `bridge/bad-token` | the `token` from `GET /status` is missing or wrong |
+| 405 | `bridge/method-not-allowed` | the restart endpoint was called with something other than POST |
+| 409 | `restart/unsupported` | this process cannot restart itself; `diagnostics` says why |
+| 413 | `bridge/body-too-large` | body exceeded 16 KiB |
+| 500 | `restart/spawn-failed` | the helper process could not be spawned |
+| 500 | `restart/helper-exited` | the helper died before writing its first log line |
+| 500 | `bridge/failed` | the route handler threw; the reason is in the plugin log |
+
+### Security
+
+Loopback peers only; the `Host` header must be a loopback name; `sec-fetch-site: cross-site` is
+rejected; `Origin` must be absent, `null`, `dsh-app://app`, or `webServer.getOrigin()`; mutating calls
+must be POST; bodies are capped at 16 KiB. On top of that, `POST /restart` must echo the `token` that
+`GET /status` just handed out — that closes the remaining hole for browsers that send neither
+`Origin` nor `Sec-Fetch-Site` (Safari before 16.4), where a cross-site form post would otherwise look
+like a same-origin request. Requests from the LAN or a phone browser get 403.
 
 ## Logs
 
@@ -88,16 +169,21 @@ otherwise look like a same-origin request. Requests from the LAN or a phone brow
 | Keyword | Meaning |
 |---|---|
 | `helper start` | helper started; includes mode / hostPid / mainPid / app path |
+| `asking … to quit` / `close politely` | the quit request was sent (AppleEvent / `taskkill` without `/F`) |
 | `leaving the app alone` | the main process never exited (usually the quit confirmation was cancelled); nothing was done |
+| `stopping desktop shell process N before its host` | Windows: forced teardown, shell first so no recovery dialog flashes |
 | `app torn down` | every process of the app/install directory is gone |
+| `pausing Ns before the first launch` | the quiet period between teardown and relaunch |
 | `launch attempt i/N` | launch attempt i |
 | `bundle-id launch attempt i/2` | macOS fallback launch through the bundle identifier |
 | `instance came up and exited again` | the new instance started and died again (environment or single-instance lock); retrying |
 | `relaunched ... (attempt i)` | success, and the new main process is stable |
 | `relaunched DSH as pid N` | CLI mode: the replacement process started |
+| `restored and focused the window of pid N` | Windows: the minimised window was brought back |
 | `working directory ... is gone` | the recorded cwd disappeared; the CLI was relaunched from `HOME` |
 | `process table unavailable` | `ps`/PowerShell could not be read; the helper stopped the root without its descendants instead of assuming everything was already gone |
 | `relaunch FAILED` | every attempt failed; open the app manually |
+| `unsupported platform … refusing to restart` | the helper refuses to touch anything on Linux |
 
 Logs and orphaned `target-*.json` files older than a week are swept when the plugin starts.
 
@@ -109,15 +195,28 @@ that nothing was restarted instead of waiting for a new host.
 
 ## Environment switches
 
-| Variable | Effect |
-|---|---|
-| `DSH_RESTART_MODE` | `desktop`, `cli`, or `off`. Forces the carrier shape, or disables the bridge entirely (`status` reports `disabled-by-mode`, `restart` answers 409). |
-| `DSH_RESTART_DRY_RUN` | `1` = dry run (see above). |
-| `DSH_RESTART_QUIT_WAIT_MS` / `_QUIT_GRACE_MS` / `_SETTLE_MS` / `_PAUSE_MS` / `_CONFIRM_MS` / `_LAUNCH_WAIT_MS` / `_LAUNCH_TRIES` / `_PROCESS_WAIT_MS` | Timing knobs, read by the helper at startup. |
-| `DSH_RESTART_OPEN_BIN` | Overrides `/usr/bin/open` (macOS only; used by tests). |
+| Variable | Default | Effect |
+|---|---|---|
+| `DSH_RESTART_MODE` | *(unset)* | `desktop`, `cli`, or `off`. Forces the carrier shape, or disables the bridge entirely (`status` reports `disabled-by-mode`, `restart` answers 409). |
+| `DSH_RESTART_DRY_RUN` | *(unset)* | `1` = dry run (see above). |
+| `DSH_RESTART_QUIT_WAIT_MS` | 90000 | desktop (macOS): how long the main process may take to exit before the helper gives up. |
+| `DSH_RESTART_QUIT_GRACE_MS` | 8000 | desktop (Windows): how long the polite close gets before the tree is forced down. |
+| `DSH_RESTART_SETTLE_MS` | 6000 | how long the old app has to disappear completely once its main process exited. |
+| `DSH_RESTART_PAUSE_MS` | 3000 | quiet period between teardown and the first launch. |
+| `DSH_RESTART_CONFIRM_MS` | 3000 | a relaunched instance must stay alive this long to count as success. |
+| `DSH_RESTART_LAUNCH_WAIT_MS` | 15000 | how long to wait for a launched instance to appear at all. |
+| `DSH_RESTART_LAUNCH_TRIES` | 4 | launch attempts before the macOS bundle-id fallback (2 more). |
+| `DSH_RESTART_PROCESS_WAIT_MS` | 20000 | how long a process may take to exit after being signalled (cli mode). |
+| `DSH_RESTART_OPEN_BIN` | `/usr/bin/open` | overrides the launcher (macOS only; used by tests). |
 
 All `DSH_RESTART_*` variables are passed through the clean LaunchServices environment, so they reach
-the helper even in desktop mode.
+the helper even in desktop mode. Values must be non-negative numbers; anything else falls back to the
+default.
+
+Note that the clean environment keeps only `HOME/USER/LOGNAME/SHELL/TMPDIR/LANG/PATH`, so the
+relaunched app does **not** inherit `http_proxy`, custom `NODE_*` settings or shell-injected
+variables — that is deliberate (see below), but it means a launch that depends on them must get them
+from DSH's own configuration instead.
 
 ## Tests
 
@@ -242,10 +341,17 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Known limitations
 
+- **Windows 2.3.1 teardown order is not re-verified on hardware.** The shell-before-host change is
+  covered by a source-level assertion, but the visible symptom it fixes (the recovery dialog flashing)
+  can only be confirmed by restarting the desktop app on Windows once.
 - **Windows quit path**: quitting keeps a polite `taskkill /PID` first (so DSH could still show its
   own confirmation), but because closing the window only hides DSH to the tray, the helper forces the
   process trees down after `QUIT_GRACE_MS` (8 s, `DSH_RESTART_QUIT_GRACE_MS`). The relaunch requires
-  the new main process to stay alive for 3 s. This path is verified on Windows hardware as of 2.2.1.
+  the new main process to stay alive for 3 s. The quit path itself was verified on Windows hardware
+  in 2.2.1.
+- **The relaunch environment is deliberately minimal**, so a DSH that depends on inherited
+  `http_proxy`/`NODE_*`/shell variables will come back without them. This is what prevents the
+  Node-mode relaunch failure described below; it is not configurable on purpose.
 - A `dsh web` started with `--port 0` comes back on a different port; the page polls relative paths,
   so it can only ask you to open the new address. Fixed ports are fine.
 - Restarting the desktop app necessarily interrupts the current turn/session.
