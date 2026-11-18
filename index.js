@@ -59,7 +59,10 @@ const HELPER_DIRECTORY = join(tmpdir(), 'dsh-restart')
 
 /* ---------------------------------------------------------------- detection */
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0'])
+// Same set `isLoopbackAddress` accepts for the peer: `0.0.0.0` is not a
+// loopback address (it is "unspecified"), so it must not sneak past the Host
+// header check just because the socket test is stricter.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
 
 export function isLoopbackAddress(address) {
   if (typeof address !== 'string') return false
@@ -175,6 +178,9 @@ export function detectTarget(options = {}) {
       mainPid: null,
       hostPid: pid,
       args: argv.slice(1),
+      // Node flags (`--expose-internals`, `--max-old-space-size`, …) live in
+      // execArgv, not argv; without them a relaunch is not the same command.
+      execArgv: options.execArgv ?? process.execArgv,
       // The replacement inherits the carrier's working directory so relative
       // paths in argv keep resolving; the helper falls back to HOME if it is gone.
       cwd: options.cwd ?? process.cwd(),
@@ -354,6 +360,7 @@ export function buildTargetFile(target, settings) {
     appId: target.appId ?? null,
     mainBinary: target.mainBinary ?? null,
     args: target.args ?? [],
+    execArgv: Array.isArray(target.execArgv) ? target.execArgv : [],
     cwd: target.cwd ?? null,
     logPath: settings.logPath,
     delayMs: settings.delayMs,

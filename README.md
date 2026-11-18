@@ -273,6 +273,20 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Changelog
 
+### 2.3.3
+
+- CLI (`dsh web`) relaunches now reproduce the carrier's node flags: `execArgv`
+  (`--expose-internals`, `--max-old-space-size`, …) is recorded in the task file and prepended to
+  the replacement's argv. Previously a relaunch silently dropped those flags.
+- Windows: process-table reads during the 250 ms polls are cached for a short TTL, so a full
+  quit wait no longer spawns hundreds of PowerShell + CIM round trips. The cache is invalidated
+  after every kill and before each "is an instance already up" check, so no decision reads a
+  stale snapshot.
+- The Host header check no longer accepts `0.0.0.0` (it is "unspecified", not loopback), matching
+  the peer-address check that already refused it.
+- The settle log now distinguishes "app still has processes" from "process table unreadable",
+  instead of claiming live processes when the table simply could not be read.
+
 ### 2.3.2
 
 - Fixed a Windows-only failure mode with severe consequences: when the process-table query

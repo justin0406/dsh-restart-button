@@ -274,15 +274,41 @@ assert.deepEqual(plan, {
   appId: 'com.deepseek.dsh',
   mainBinary: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
   args: [],
+  execArgv: [],
   cwd: null,
   logPath: '/tmp/dsh-restart/restart-1.log',
   delayMs: 900,
   dryRun: true,
 })
+// CLI targets must carry the carrier's node flags, or the relaunch is not the
+// same command.
+const cliPlan = plugin.buildTargetFile(
+  {
+    mode: 'cli',
+    hostPid: 4242,
+    mainPid: null,
+    appPath: process.execPath,
+    args: ['/somewhere/dsh/lib/cli.js', 'web'],
+    execArgv: ['--expose-internals'],
+    cwd: '/tmp',
+  },
+  { logPath: '/tmp/dsh-restart/restart-2.log', delayMs: 900, dryRun: true },
+)
+assert.deepEqual(cliPlan.execArgv, ['--expose-internals'])
+assert.deepEqual(
+  plugin.buildTargetFile({ mode: 'cli', hostPid: 1, appPath: 'node', args: [] }, { logPath: 'x', delayMs: 1, dryRun: true }).execArgv,
+  [],
+  'a target without execArgv defaults to an empty list, never undefined',
+)
 assert.deepEqual(plugin.nodeModeVariables({ ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--x' }), [
   'ELECTRON_RUN_AS_NODE',
   'NODE_OPTIONS',
 ])
 console.log('ok: helper task file shape and node-mode diagnostics')
 
+// `0.0.0.0` is "unspecified", not loopback: the Host header check must refuse
+// it exactly like the peer check does.
+assert.equal(plugin.isTrustedRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: '0.0.0.0:53556' } }, webServer), false)
+assert.equal(plugin.isTrustedRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: '[::1]:53556' } }, webServer), true)
+console.log('ok: loopback host checks accept real loopback only')
 console.log('\nALL HOST TESTS PASSED')

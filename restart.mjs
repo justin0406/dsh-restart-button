@@ -135,7 +135,7 @@ export function runCapture(command, args, timeoutMs = 15_000) {
  * `null` is not an empty table: callers must treat it as "unknown" and keep
  * waiting rather than conclude that the app is gone.
  */
-export async function processTable(platform = PLATFORM, capture = runCapture) {
+async function rawProcessTable(platform, capture) {
   if (platform === 'win32') {
     const text = await capture(
       'powershell.exe',
@@ -158,6 +158,44 @@ export async function processTable(platform = PLATFORM, capture = runCapture) {
   // A real `ps -A` always contains at least init, so an empty parse means the
   // output was unusable.
   return table.size === 0 ? null : table
+}
+
+/**
+ * Short-TTL memo around a table read.  The waits poll every 250 ms; on
+ * Windows each uncached read is a full PowerShell + CIM round trip, so
+ * without this a 90 s quit wait costs hundreds of them.  A cached `null`
+ * (unreadable) keeps its "unknown" semantics for the same window.  Callers
+ * that just changed the world (`stopTree` after kills) call `invalidate()`.
+ */
+export const TABLE_CACHE_MS = 1_000
+
+export function createTableCache(fetch, ttlMs = TABLE_CACHE_MS, now = Date.now) {
+  let at = Number.NEGATIVE_INFINITY
+  let value
+  const read = async () => {
+    if (now() - at < ttlMs) return value
+    value = await fetch()
+    at = now()
+    return value
+  }
+  read.invalidate = () => {
+    at = Number.NEGATIVE_INFINITY
+  }
+  return read
+}
+
+const windowsTableCache = createTableCache(() => rawProcessTable('win32', runCapture))
+
+/** Invalidate the Windows table cache after killing something. */
+export function invalidateTableCache() {
+  windowsTableCache.invalidate()
+}
+
+export async function processTable(platform = PLATFORM, capture = runCapture) {
+  // Only the real (spawn-based) Windows read is worth caching; tests inject
+  // their own `capture` and must always see it called.
+  if (platform === 'win32' && capture === runCapture) return windowsTableCache()
+  return rawProcessTable(platform, capture)
 }
 
 /** Children before parents, so that a tree can be signalled bottom-up. */
@@ -377,6 +415,7 @@ export async function stopTree(rootPid, log = () => {}, { signal = 'SIGTERM', gr
     // `descendantOrder` already excludes this process.
     for (const pid of order) await runCapture('taskkill', ['/PID', String(pid), '/F'])
     await runCapture('taskkill', ['/PID', String(rootPid), '/F'])
+    invalidateTableCache()
     return order.length > 0 ? order : [rootPid]
   }
   for (const pid of order) signalPid(pid, signal)
@@ -588,8 +627,17 @@ async function restartDesktop(target, log) {
     settled = settled && unregistered
   }
   if (!settled) {
-    log(`app still has processes after ${Math.round(SETTLE_MS / 1000)}s; sweeping what is left`)
     const table = await processTable()
+    // Distinguish "still has processes" from "cannot tell": an unreadable
+    // table used to log "app still has processes", which points whoever reads
+    // the log at the wrong problem.
+    const reason =
+      table === null
+        ? 'cannot confirm the app is down: the process table is unreadable'
+        : findAppProcesses(target, table).length > 0
+          ? `app still has processes after ${Math.round(SETTLE_MS / 1000)}s`
+          : 'the app is not confirmed down yet'
+    log(`${reason}; sweeping what is left`)
     const leftovers = table === null ? [] : findAppProcesses(target, table)
     if (leftovers.length > 0) {
       const hostPid = target.hostPid
@@ -608,6 +656,9 @@ async function restartDesktop(target, log) {
   let attempts = 0
   for (let attempt = 1; attempt <= LAUNCH_TRIES; attempt += 1) {
     attempts = attempt
+    // The "is an instance already up" check must not read a snapshot from
+    // before the previous attempt died; a stale hit would skip the launch.
+    invalidateTableCache()
     if ((await mainProcessCount(target)) !== 0) {
       log('a live DSH instance already exists; nothing to launch')
       return 0
@@ -634,6 +685,7 @@ async function restartDesktop(target, log) {
   if (IS_MAC && target.appId !== undefined && target.appId !== null) {
     log('falling back to the bundle identifier')
     for (let attempt = 1; attempt <= 2; attempt += 1) {
+      invalidateTableCache()
       if ((await mainProcessCount(target)) !== 0) {
         log('a live DSH instance already exists; nothing to launch')
         return 0
@@ -676,6 +728,18 @@ export function resolveWorkingDirectory(cwd, log = () => {}) {
   return process.env.HOME !== undefined && process.env.HOME !== '' ? process.env.HOME : undefined
 }
 
+/**
+ * Full argv for the replacement CLI: node flags recorded at restart time
+ * (`execArgv`) first, then the original positional arguments.  The helper runs
+ * detached, so nothing of the original invocation survives unless we copy it
+ * into the target file.
+ */
+export function cliSpawnArgs(target) {
+  const flags = Array.isArray(target?.execArgv) ? target.execArgv.filter((flag) => typeof flag === 'string' && flag !== '') : []
+  const args = Array.isArray(target?.args) ? target.args : []
+  return [...flags, ...args]
+}
+
 async function restartCli(target, log) {
   const hostPid = target.hostPid
   if (Number.isInteger(hostPid) && hostPid > 0) {
@@ -689,7 +753,7 @@ async function restartCli(target, log) {
     log(`launch attempt ${attempt}/${LAUNCH_TRIES}`)
     let child
     try {
-      child = spawn(target.appPath, Array.isArray(target.args) ? target.args : [], {
+      child = spawn(target.appPath, cliSpawnArgs(target), {
         detached: true,
         stdio: 'ignore',
         cwd,

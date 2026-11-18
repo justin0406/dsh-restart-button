@@ -297,6 +297,59 @@ assert.equal(restart.recordedMainAlive({ mainPid: 0 }), undefined)
 assert.equal(restart.recordedMainAlive({ mainPid: 'x' }), undefined)
 console.log('ok: the exit wait falls back to the recorded main pid when the table is unreadable')
 
+// The CLI relaunch must reproduce the original command line, node flags first.
+assert.deepEqual(
+  restart.cliSpawnArgs({ execArgv: ['--expose-internals', ''], args: ['/dsh/lib/cli.js', 'web'] }),
+  ['--expose-internals', '/dsh/lib/cli.js', 'web'],
+  'flags precede positional args and empty strings are dropped',
+)
+assert.deepEqual(restart.cliSpawnArgs({ args: ['web'] }), ['web'], 'a target without execArgv still relaunches')
+assert.deepEqual(restart.cliSpawnArgs({}), [], 'a bare target produces an empty argv')
+console.log('ok: cliSpawnArgs reproduces the carrier command line')
+
+// The Windows table cache collapses the 250 ms poll storm into one CIM call
+// per TTL window, and `invalidate()` forces the very next read to refresh.
+{
+  let clock = 0
+  let reads = 0
+  let last
+  const cache = restart.createTableCache(
+    async () => {
+      reads += 1
+      last = `table-${reads}`
+      return last
+    },
+    restart.TABLE_CACHE_MS,
+    () => clock,
+  )
+  assert.equal(await cache(), 'table-1')
+  assert.equal(reads, 1)
+  clock += 100
+  assert.equal(await cache(), 'table-1', 'a fresh snapshot is reused inside the TTL')
+  assert.equal(reads, 1)
+  clock += restart.TABLE_CACHE_MS
+  assert.equal(await cache(), 'table-2', 'an expired snapshot is re-read')
+  assert.equal(reads, 2)
+  cache.invalidate()
+  assert.equal(await cache(), 'table-3', 'invalidate forces the next read to hit the source')
+  assert.equal(reads, 3)
+}
+{
+  let reads = 0
+  const cache = restart.createTableCache(
+    async () => {
+      reads += 1
+      return null
+    },
+    restart.TABLE_CACHE_MS,
+    () => 0,
+  )
+  assert.equal(await cache(), null)
+  assert.equal(await cache(), null)
+  assert.equal(reads, 1, 'an unreadable table keeps its "unknown" verdict for the TTL window')
+}
+console.log('ok: the Windows table cache serves repeat reads from one snapshot')
+
 // The numeric knobs must honour their environment overrides; checks run in a
 // child process because the constants are bound at import time. The module is
 // addressed by its file URL and the cwd by a filesystem path, so the probe works
