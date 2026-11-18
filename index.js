@@ -36,7 +36,12 @@ const MIN_DELAY_MS = 200
 const MAX_DELAY_MS = 10_000
 const MAX_BODY_BYTES = 16 * 1024
 const RESTART_GUARD_MS = 90_000
-const HELPER_START_TIMEOUT_MS = 1_200
+// The helper only needs to write its first log line, but on Windows an
+// Electron-as-node cold start (plus antivirus scanning the binary) can take a
+// couple of seconds; 1.2s made slow machines fail every restart with a false
+// `restart/helper-exited`. 3s only bounds the failure path — a healthy helper
+// returns as soon as its log appears.
+const HELPER_START_TIMEOUT_MS = 3_000
 /** Helper logs and orphaned task files older than this are swept on startup. */
 const TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000
 

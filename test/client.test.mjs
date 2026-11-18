@@ -337,6 +337,27 @@ for (let round = 0; round < 30 && reloads === 0; round += 1) {
 assert.ok(reloads > 0, 'page must reload once the new host answers')
 console.log('ok: confirm restarts and reloads when the host pid changes')
 
+// 3c. While the restart is in flight the footer button is locked: a second
+// click must not clobber the waiting state or start another poll loop.
+const statusCallsWhileBusy = requests.filter((entry) => entry.url === '/api/dsh-restart/status').length
+const busyFooter = await mount(FooterAction, { wide: true })
+const busyButton = findAll(busyFooter.tree, (node) => node.type === 'button')[0]
+assert.equal(busyButton.props.disabled, true, 'footer button must be disabled while a restart is in flight')
+await busyButton.props.onClick()
+await tick()
+assert.equal(
+  requests.filter((entry) => entry.url === '/api/dsh-restart/status').length,
+  statusCallsWhileBusy,
+  'clicking the busy footer must not probe status again',
+)
+console.log('ok: footer is locked while a restart is in flight')
+
+// Reset through the dialog's own cancel so the next scenarios start from idle.
+const waitingView = await mount(Dialog, {})
+const waitingCancel = findAll(waitingView.tree, (node) => node.props?.['data-dsh-restart-cancel'] === '')[0]
+assert.ok(waitingCancel, 'the waiting dialog must stay dismissable')
+waitingCancel.props.onClick()
+
 // 3b. Dry run: the host answers 200 with a plan and accepted:false. The dialog
 // must say so immediately instead of waiting two minutes for a new host.
 restartStatus = 200

@@ -282,6 +282,21 @@ try {
   rmSync(cwdDirectory, { recursive: true, force: true })
 }
 
+// A restart the helper itself initiated must still complete when the process
+// table cannot be read: the exit wait falls back to the recorded main pid
+// instead of waiting out QUIT_WAIT_MS and "leaving the app alone" — which on
+// Windows meant the shell had already been force-killed and never relaunched.
+assert.equal(restart.mainExited(0, true), true, 'count 0 is positive proof')
+assert.equal(restart.mainExited(1, false), false, 'a live count is never "exited"')
+assert.equal(restart.mainExited(null, false), true, 'unreadable table + dead main pid counts as exited')
+assert.equal(restart.mainExited(null, true), false, 'unreadable table + live main pid keeps waiting')
+assert.equal(restart.mainExited(null, undefined), false, 'unreadable table without a recorded pid keeps waiting')
+assert.equal(restart.recordedMainAlive({ mainPid: process.pid }), true, 'a recorded live pid reports alive')
+assert.equal(restart.recordedMainAlive({}), undefined, 'no recorded pid reports unknown')
+assert.equal(restart.recordedMainAlive({ mainPid: 0 }), undefined)
+assert.equal(restart.recordedMainAlive({ mainPid: 'x' }), undefined)
+console.log('ok: the exit wait falls back to the recorded main pid when the table is unreadable')
+
 // The numeric knobs must honour their environment overrides; checks run in a
 // child process because the constants are bound at import time. The module is
 // addressed by its file URL and the cwd by a filesystem path, so the probe works

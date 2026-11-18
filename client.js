@@ -30,7 +30,9 @@ window.__ModuleLoader__.load({
       'dialog.unsupported': '当前运行环境无法自行重启，请手动退出后重新打开。',
       'dialog.dryRun': '当前处于干跑模式，没有真的重启（详见主机日志）。',
       'error.forbidden': '请求被拒绝：只允许本机页面调用。',
+      'error.token': '校验失败：请关闭弹窗后重新点击按钮再试。',
       'error.spawn': '助手启动失败，未能执行重启。',
+      'error.helper': '重启助手异常退出，本次未执行重启；详情见主机日志。',
       'error.reloadTimeout': '等待超时，请手动刷新页面或重新打开应用。',
       'error.generic': '重启失败。',
     }
@@ -52,7 +54,9 @@ window.__ModuleLoader__.load({
       'dialog.unsupported': 'This runtime cannot restart itself; quit and reopen the app manually.',
       'dialog.dryRun': 'Dry-run mode is on: nothing was restarted (see the host log).',
       'error.forbidden': 'Request refused: only local pages may call this.',
+      'error.token': 'Verification failed: close the dialog and click the button again.',
       'error.spawn': 'The helper could not be started, so nothing was restarted.',
+      'error.helper': 'The restart helper exited before doing anything; see the host log for details.',
       'error.reloadTimeout': 'Timed out. Reload the page or reopen the app manually.',
       'error.generic': 'Restart failed.',
     }
@@ -116,7 +120,9 @@ window.__ModuleLoader__.load({
     const describeFailure = (t, result) => {
       const code = result?.body?.error?.code
       if (code === 'bridge/forbidden' || code === 'restart/forbidden') return t('error.forbidden')
+      if (code === 'bridge/bad-token') return t('error.token')
       if (code === 'restart/spawn-failed') return t('error.spawn')
+      if (code === 'restart/helper-exited') return t('error.helper')
       if (code === 'restart/unsupported') return t('dialog.unsupported')
       const message = result?.body?.error?.message
       return typeof message === 'string' && message !== '' ? message : t('error.generic')
@@ -251,7 +257,12 @@ window.__ModuleLoader__.load({
           'aria-label': t('footer.tooltip'),
           title: t('footer.tooltip'),
           'aria-busy': busy ? 'true' : 'false',
+          // Locking the button keeps a second click from clobbering the
+          // waiting state (openDialog would patch the phase back to
+          // 'checking'/'confirm') and from starting a second poll loop.
+          disabled: busy,
           onClick: () => {
+            if (busy) return
             openDialog(ctxLocale.bind(NS))
           },
           style: {

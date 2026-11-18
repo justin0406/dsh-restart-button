@@ -519,6 +519,30 @@ async function mainProcessCount(target) {
   return table === null ? null : findMainProcesses(target, table).length
 }
 
+/**
+ * Is the old main process really gone?
+ *
+ * `count === 0` is positive proof.  An unreadable table (`null`) is not proof
+ * of anything — but once we have asked the app to quit we can still consult the
+ * main pid recorded when the plugin loaded.  Without that fallback, a machine
+ * whose `ps` / WMI query keeps failing would let the helper kill the shell
+ * (Windows forces it down after `QUIT_GRACE_MS`) and then wait out the whole
+ * `QUIT_WAIT_MS` before "leaving the app alone": a restart that quits and
+ * never comes back.  `alive === undefined` means no pid was recorded, so the
+ * wait keeps going as before.
+ */
+export function mainExited(count, alive) {
+  if (count === 0) return true
+  if (count === null) return alive === false
+  return false
+}
+
+/** Liveness of the recorded main pid, or `undefined` when none was recorded. */
+export function recordedMainAlive(target) {
+  if (!Number.isInteger(target?.mainPid) || target.mainPid <= 0) return undefined
+  return pidAlive(target.mainPid)
+}
+
 async function launchServicesRegistered(target) {
   if (!IS_MAC || target.appId === undefined || target.appId === null) return false
   const text = await runCapture('/usr/bin/lsappinfo', ['find', `bundleID=${target.appId}`])
@@ -530,18 +554,25 @@ async function launchServicesRegistered(target) {
 
 async function restartDesktop(target, log) {
   // Both predicates count processes; `null` means the table was unreadable.
-  // The two comparisons are deliberately different:
+  // The three comparisons are deliberately different:
   //   - "does an instance already exist"  -> `!== 0`, so an unknown table makes
   //     us assume it does and never launch a second copy;
   //   - "did the new instance appear"     -> `> 0`, so an unknown table is not
-  //     accepted as proof and the wait keeps going.
+  //     accepted as proof and the wait keeps going;
+  //   - "did the old instance exit"       -> `mainExited`, which falls back to
+  //     the recorded main pid when the table is unreadable, so a restart the
+  //     helper itself initiated still completes on such machines.
   const appCount = async () => {
     const table = await processTable()
     return table === null ? null : findAppProcesses(target, table).length
   }
 
   await requestQuit(target, log)
-  const exited = await waitFor(async () => (await mainProcessCount(target)) === 0, QUIT_WAIT_MS, 500)
+  const exited = await waitFor(
+    async () => mainExited(await mainProcessCount(target), recordedMainAlive(target)),
+    QUIT_WAIT_MS,
+    500,
+  )
   if (!exited) {
     log(
       `main process is still alive ${Math.round(QUIT_WAIT_MS / 1000)}s after the quit request ` +

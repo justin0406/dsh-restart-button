@@ -273,6 +273,24 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Changelog
 
+### 2.3.2
+
+- Fixed a Windows-only failure mode with severe consequences: when the process-table query
+  (`Get-CimInstance`) keeps failing, the helper still force-killed the shell after the polite
+  close was ignored, but the subsequent "did the main process exit" wait only trusted the
+  unreadable table — so it waited out the full 90 s, logged `leaving the app alone`, and never
+  relaunched. A restart on a machine with a broken WMI service turned into "quit and never come
+  back". The exit wait now falls back to the main pid recorded when the plugin loaded
+  (`mainExited`); the "a live instance already exists" check keeps its conservative
+  table-only semantics.
+- The sidebar button is now locked while a restart is in flight (`disabled` + click guard):
+  a second click used to clobber the waiting state and start a second poll loop.
+- The helper-start window was raised from 1.2 s to 3 s. On Windows, Electron-as-node cold
+  starts plus antivirus scanning could exceed 1.2 s, making every restart fail with a false
+  `restart/helper-exited` before the helper had a chance to write its first log line.
+- `bridge/bad-token` and `restart/helper-exited` now have dedicated dialog messages instead
+  of the generic failure text.
+
 ### 2.3.1
 
 - Windows desktop restarts no longer flash the shell's fatal recovery dialog
