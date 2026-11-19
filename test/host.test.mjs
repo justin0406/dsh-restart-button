@@ -311,4 +311,33 @@ console.log('ok: helper task file shape and node-mode diagnostics')
 assert.equal(plugin.isTrustedRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: '0.0.0.0:53556' } }, webServer), false)
 assert.equal(plugin.isTrustedRequest({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: '[::1]:53556' } }, webServer), true)
 console.log('ok: loopback host checks accept real loopback only')
+
+// ---- restart guard ----------------------------------------------------------
+// 旧实现是固定 90s 定时器，短于 helper 最坏路径（QUIT_WAIT 90s + 多轮启动确认），
+// helper 仍在收尾时就会放行第二次点击。新实现：到期先探测 helperPid 存活，
+// 存活则续期； HELPER_MAX_GUARD_MS 只兜底 helper 僵死。
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+{
+  const state = { restarting: true, guardTimer: undefined }
+  let alive = true
+  plugin.armRestartGuard(state, 424242, { tickMs: 10, maxGuardMs: 200, isAlive: () => alive })
+  await sleep(60)
+  assert.equal(state.restarting, true, 'a live helper must keep the guard held past the old fixed-90s semantics')
+  alive = false
+  await sleep(40)
+  assert.equal(state.restarting, false, 'the guard must release once the helper exits')
+  clearTimeout(state.guardTimer)
+  console.log('ok: guard renews while the helper is alive and releases after exit')
+}
+
+{
+  const state = { restarting: true, guardTimer: undefined }
+  plugin.armRestartGuard(state, 424242, { tickMs: 10, maxGuardMs: 60, isAlive: () => true })
+  await sleep(120)
+  assert.equal(state.restarting, false, 'a wedged helper must not hold the guard forever (hard cap)')
+  clearTimeout(state.guardTimer)
+  console.log('ok: guard hard cap releases even when the helper never exits')
+}
+
 console.log('\nALL HOST TESTS PASSED')

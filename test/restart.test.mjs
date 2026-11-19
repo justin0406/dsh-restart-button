@@ -101,7 +101,7 @@ assert.deepEqual(order, [4300, 4400, 4242, 4000], 'children must come before the
 const excluded = restart.descendantOrder(tree, 4000, 4242)
 assert.equal(excluded.includes(4242), false, 'the helper itself must be excluded')
 assert.equal(excluded.includes(9999), false, 'unrelated processes must be excluded')
-assert.deepEqual([...restart.descendants(tree, 4242, -1).keys()], [4300, 4400, 4242])
+assert.deepEqual(restart.descendantOrder(tree, 4242, -1), [4300, 4400, 4242])
 console.log('ok: descendant ordering is bottom-up and self-excluding')
 
 /* ------------------------------------------------------------- environments */
@@ -193,7 +193,7 @@ console.log('ok: windows main/app process matching')
 
 const directory = mkdtempSync(join(tmpdir(), 'dsh-restart-test-'))
 try {
-  const logPath = restart.defaultLogPath(1234)
+  const logPath = restart.defaultLogPath(join(tmpdir(), 'dsh-restart'), 1234)
   assert.match(logPath, /dsh-restart[/\\]restart-1234\.log$/u)
   const write = restart.createLogger(join(directory, 'restart.log'))
   write('hello')

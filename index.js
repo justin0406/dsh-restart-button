@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { platform as osPlatform, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const inject = ['webServer']
@@ -31,11 +31,9 @@ export const inject = ['webServer']
 export const PLUGIN_NAME = 'dsh-restart-button'
 const ROUTE_PREFIX = '/api/dsh-restart'
 const DEFAULT_APP_ID = 'com.deepseek.dsh'
-const DEFAULT_DELAY_MS = 900
 const MIN_DELAY_MS = 200
 const MAX_DELAY_MS = 10_000
 const MAX_BODY_BYTES = 16 * 1024
-const RESTART_GUARD_MS = 90_000
 // The helper only needs to write its first log line, but on Windows an
 // Electron-as-node cold start (plus antivirus scanning the binary) can take a
 // couple of seconds; 1.2s made slow machines fail every restart with a false
@@ -44,6 +42,55 @@ const RESTART_GUARD_MS = 90_000
 const HELPER_START_TIMEOUT_MS = 3_000
 /** Helper logs and orphaned task files older than this are swept on startup. */
 const TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000
+
+// Helper 的时间常量以 restart.mjs 为唯一来源（DEFAULT_DELAY_MS 等在两侧都要用，
+// 各自定义一份迟早漂移）。静态导入是安全的：restart.mjs 顶层有 isDirectRun()
+// 守卫，被导入时只定义函数、不会执行主流程。
+import {
+  CONFIRM_MS,
+  DEFAULT_DELAY_MS,
+  LAUNCH_TRIES,
+  LAUNCH_WAIT_MS,
+  PAUSE_MS,
+  QUIT_WAIT_MS,
+  SETTLE_MS,
+  pidAlive,
+} from './restart.mjs'
+
+/**
+ * Helper 的最坏运行时长：退出等待 + 收尾 + 间隙，加上主路径与 bundle-id 回退
+ * 的全部启动确认轮次（旧实现固定 90s 守卫，短于 helper 最坏路径，会在 helper
+ * 仍在收尾时放行第二次点击，造成两个 helper 并发）。
+ */
+const HELPER_MAX_GUARD_MS =
+  QUIT_WAIT_MS + SETTLE_MS + PAUSE_MS + (LAUNCH_TRIES + 2) * (LAUNCH_WAIT_MS + CONFIRM_MS) + 30_000
+/** 守卫续期粒度：每次到期先探测 helper 是否仍在运行，存活则续期。 */
+const GUARD_TICK_MS = 15_000
+
+/**
+ * Restart guard: releases `state.restarting` only once the helper has actually
+ * exited (or the hard cap is reached), so a still-running helper can never race
+ * a second click into launching a second helper.
+ */
+export function armRestartGuard(state, helperPid, {
+  tickMs = GUARD_TICK_MS,
+  maxGuardMs = HELPER_MAX_GUARD_MS,
+  isAlive = pidAlive,
+} = {}) {
+  const deadline = Date.now() + maxGuardMs
+  const arm = () => {
+    clearTimeout(state.guardTimer)
+    state.guardTimer = setTimeout(() => {
+      if (Date.now() < deadline && isAlive(helperPid)) {
+        arm()
+        return
+      }
+      state.restarting = false
+    }, tickMs)
+    state.guardTimer.unref?.()
+  }
+  arm()
+}
 
 const DESKTOP_HOST_ENTRY = /[\\/]@deepseek-ai[\\/]dsh-desktop-host[\\/]lib[\\/](?:index|main)\.(?:js|mjs|cjs)$/
 const DSH_PACKAGE_ENTRY = /[\\/]@deepseek-ai[\\/]dsh[\\/]lib[\\/][^\\/]+\.(?:js|mjs|cjs)$/
@@ -371,7 +418,6 @@ export function buildTargetFile(target, settings) {
 function writeTargetFile(target, settings) {
   mkdirSync(HELPER_DIRECTORY, { recursive: true })
   const path = join(HELPER_DIRECTORY, `target-${process.pid}-${Date.now()}.json`)
-  mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify(buildTargetFile(target, settings)))
   return path
 }
@@ -502,11 +548,9 @@ export function apply(ctx, config) {
         helperPid,
         logPath: resolved.logPath,
       }
-      clearTimeout(state.guardTimer)
-      state.guardTimer = setTimeout(() => {
-        state.restarting = false
-      }, RESTART_GUARD_MS)
-      state.guardTimer.unref?.()
+      // 守卫以 helperPid 存活为续期依据：helper 最坏路径（QUIT_WAIT 90s + 多轮
+      // 启动确认）远超固定 90s；固定定时器会在 helper 仍在收尾时放行第二次点击。
+      armRestartGuard(state, helperPid)
       log('info', 'restart helper started', {
         helperPid,
         mode: target.mode,

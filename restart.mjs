@@ -219,16 +219,6 @@ export function descendantOrder(table, rootPid, excludePid = process.pid) {
   return order
 }
 
-/** Map of pid → { ppid, args } for every descendant of rootPid. */
-export function descendants(table, rootPid, excludePid = process.pid) {
-  const map = new Map()
-  for (const pid of descendantOrder(table, rootPid, excludePid)) {
-    const row = table.get(pid)
-    if (row !== undefined) map.set(pid, row)
-  }
-  return map
-}
-
 /* ------------------------------------------------------------- environment */
 
 const PASSTHROUGH_PREFIX = 'DSH_RESTART_'
@@ -378,7 +368,7 @@ async function confirmAlive(predicate, durationMs, intervalMs = 250) {
   return predicate()
 }
 
-const pidAlive = (pid) => {
+export const pidAlive = (pid) => {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
@@ -489,7 +479,13 @@ function onceSpawned(child) {
 
 async function requestQuit(target, log) {
   if (IS_MAC) {
-    const appId = target.appId ?? 'com.deepseek.dsh'
+    if (!target.appId) {
+      // bundle id 只由 host 侧写入 target.json（那里有默认值兜底）；
+      // 这里不再维护第二份默认值，避免将来 bundle id 变更时两处漂移。
+      log('no bundle id recorded; skipping LaunchServices quit request')
+      return
+    }
+    const appId = target.appId
     log(`asking ${appId} to quit through LaunchServices`)
     try {
       const child = spawn('/usr/bin/osascript', ['-e', `tell application id "${appId}" to quit`], {
@@ -876,14 +872,10 @@ export async function runHelper(targetPath) {
   }
 }
 
-export function defaultLogPath(stamp = Date.now()) {
-  return join(tmpdir(), 'dsh-restart', `restart-${stamp}.log`)
-}
-
-export function ensureDirectory(path) {
-  try {
-    mkdirSync(dirname(path), { recursive: true })
-  } catch {}
+export function defaultLogPath(directory = join(tmpdir(), 'dsh-restart'), stamp = Date.now()) {
+  // 目录由调用方传入：host 侧持有 HELPER_DIRECTORY 这一份唯一定义，
+  // 这里不再复制第二份目录字面量（此前只有测试用到默认值）。
+  return join(directory, `restart-${stamp}.log`)
 }
 
 function isDirectRun() {
