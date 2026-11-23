@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
       'dialog.unsupported': '当前运行环境无法自行重启，请手动退出后重新打开。',
       'dialog.dryRun': '当前处于干跑模式，没有真的重启（详见主机日志）。',
       'error.forbidden': '请求被拒绝：只允许本机页面调用。',
+      'error.unauthorized': '这个页面没有被 DSH 授权，请刷新页面或重新打开应用后再试。',
       'error.token': '校验失败：请关闭弹窗后重新点击按钮再试。',
       'error.spawn': '助手启动失败，未能执行重启。',
       'error.helper': '重启助手异常退出，本次未执行重启；详情见主机日志。',
@@ -54,6 +55,7 @@ window.__ModuleLoader__.load({
       'dialog.unsupported': 'This runtime cannot restart itself; quit and reopen the app manually.',
       'dialog.dryRun': 'Dry-run mode is on: nothing was restarted (see the host log).',
       'error.forbidden': 'Request refused: only local pages may call this.',
+      'error.unauthorized': 'This page is not authorised by DSH. Reload the page or reopen the app and try again.',
       'error.token': 'Verification failed: close the dialog and click the button again.',
       'error.spawn': 'The helper could not be started, so nothing was restarted.',
       'error.helper': 'The restart helper exited before doing anything; see the host log for details.',
@@ -119,6 +121,7 @@ window.__ModuleLoader__.load({
 
     const describeFailure = (t, result) => {
       const code = result?.body?.error?.code
+      if (code === 'bridge/unauthorized') return t('error.unauthorized')
       if (code === 'bridge/forbidden' || code === 'restart/forbidden') return t('error.forbidden')
       if (code === 'bridge/bad-token') return t('error.token')
       if (code === 'restart/spawn-failed') return t('error.spawn')

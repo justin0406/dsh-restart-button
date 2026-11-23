@@ -273,6 +273,17 @@ silently and does nothing, which looks like "the button waits forever". The help
 
 ## Changelog
 
+### 2.3.4
+
+- Both bridge routes now run through `ctx.connection.requestRejection` before anything else, so a
+  request is admitted only when DSH's own connection layer vouches for it: the host's Host/Origin
+  fence plus the browser credential minted for the window driving this instance. The previous
+  loopback check alone let any page in the user's browser reach the routes, since such a page is
+  local too. The gate fails closed if the connection service is missing or throws.
+- The plugin now declares `connection` as a dependency next to `webServer`.
+- A refused request answers `401`/`403` with `bridge/unauthorized`, and the dialog explains it
+  instead of falling back to the generic failure text.
+
 ### 2.3.3
 
 - CLI (`dsh web`) relaunches now reproduce the carrier's node flags: `execArgv`

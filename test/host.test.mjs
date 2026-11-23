@@ -17,14 +17,18 @@ const webServer = {
 }
 
 const origin = 'http://127.0.0.1:53556'
+// The host gate answer for the next request: undefined admits, 401/403 rejects.
+let rejection
+const connection = { requestRejection: () => rejection }
 const ctx = {
   webServer,
+  connection,
   logger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
   effect: (fn) => fn(),
 }
 
 plugin.apply(ctx)
-assert.deepEqual(plugin.inject, ['webServer'])
+assert.deepEqual(plugin.inject, ['webServer', 'connection'])
 assert.equal(routes.length, 2)
 assert.deepEqual(
   routes.map((route) => `${route.kind} ${route.path}`),
@@ -215,6 +219,29 @@ console.log('ok: desktop app Origin (dsh-app://app) is trusted')
 res = await call('/api/dsh-restart/status', { method: 'GET', headers: { origin } })
 assert.equal(res.statusCode, 200)
 console.log('ok: same-origin request is trusted')
+
+// The host's own gate runs first: whatever DSH would refuse never reaches the
+// bridge, even when the caller is loopback and carries no Origin at all.
+rejection = 401
+res = await call('/api/dsh-restart/status', { method: 'GET' })
+assert.equal(res.statusCode, 401)
+assert.equal(res.json().error.code, 'bridge/unauthorized')
+
+rejection = 403
+res = await call('/api/dsh-restart/status', { method: 'GET', headers: { origin } })
+assert.equal(res.statusCode, 403)
+assert.equal(res.json().error.code, 'bridge/unauthorized')
+
+rejection = undefined
+res = await call('/api/dsh-restart/status', { method: 'GET', headers: { origin } })
+assert.equal(res.statusCode, 200)
+console.log('ok: the DSH connection gate fronts both routes')
+
+// A missing or throwing connection service fails closed instead of opening up.
+assert.equal(plugin.requestRejection(undefined, { headers: {} }), 403)
+assert.equal(plugin.requestRejection({ requestRejection: () => { throw new Error('boom') } }, { headers: {} }), 403)
+assert.equal(plugin.requestRejection({ requestRejection: () => undefined }, { headers: {} }), undefined)
+console.log('ok: the gate fails closed when the connection service is unusable')
 
 // ---- restart route --------------------------------------------------------
 

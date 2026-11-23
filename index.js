@@ -26,7 +26,7 @@ import { platform as osPlatform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const inject = ['webServer']
+export const inject = ['webServer', 'connection']
 
 export const PLUGIN_NAME = 'dsh-restart-button'
 const ROUTE_PREFIX = '/api/dsh-restart'
@@ -354,6 +354,22 @@ export function isTrustedRequest(req, webServer) {
   return true
 }
 
+/**
+ * The host's own gate for plugin routes: its Host/Origin fence plus the browser
+ * credential it minted for the window that is driving this instance.
+ * `isTrustedRequest` only proves the caller is local, and any page in the user's
+ * browser is local too, so the connection check has to run first. Fails closed
+ * when the service is missing or throws.
+ */
+export function requestRejection(connection, req) {
+  if (typeof connection?.requestRejection !== 'function') return 403
+  try {
+    return connection.requestRejection(req)
+  } catch {
+    return 403
+  }
+}
+
 /* ------------------------------------------------------------------ helper */
 
 function clampDelay(value) {
@@ -455,6 +471,7 @@ export function apply(ctx, config) {
     if (logger !== undefined && typeof logger[level] === 'function') logger[level](...rest)
   }
   const webServer = ctx.webServer
+  const connection = ctx.connection
   const state = { restarting: false, lastRequest: null, guardTimer: undefined }
   // Handed out by `status` and required by `restart`, so a cross-site form post
   // that carries neither `Origin` nor `Sec-Fetch-Site` cannot trigger a restart.
@@ -577,6 +594,11 @@ export function apply(ctx, config) {
   }
 
   const guard = (handler, { mutating }) => async (req, res) => {
+    const rejection = requestRejection(connection, req)
+    if (rejection !== undefined) {
+      fail(res, rejection, 'bridge/unauthorized', 'This request did not come from the DSH window that owns this instance.')
+      return
+    }
     if (!isTrustedRequest(req, webServer)) {
       fail(res, 403, 'bridge/forbidden', 'Only local requests from this DSH instance are allowed.')
       return

@@ -243,6 +243,15 @@ macOS 的 `TMPDIR` 在 `argv` 里是 `/var/folders/...`，而 `import.meta.url` 
 
 ## 变更记录
 
+### 2.3.4
+
+- 两条 bridge 路由现在会先过 `ctx.connection.requestRejection`：只有 DSH 连接层认可的请求才会
+  被放行——即主机自身的 Host/Origin 校验，加上宿主为「正在操作这个实例的窗口」签发的浏览器
+  凭据。此前只做回环校验，而浏览器里打开的任意网页同样是本机来源，因此都可能调到这两条路由。
+  连接服务缺失或抛错时一律拒绝（fail closed）。
+- 插件依赖从 `webServer` 扩为 `webServer` + `connection`。
+- 被拒绝时返回 `401`/`403` 与 `bridge/unauthorized`，弹窗给出对应说明，不再退化成通用错误。
+
 ### 2.3.3
 
 - CLI（`dsh web`）重启现在会还原载体进程的 node 启动旗标：`execArgv`（`--expose-internals`、
